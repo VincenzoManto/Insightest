@@ -1,0 +1,39 @@
+# Dependencies & build output
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+
+# Local secrets / config (use backend/config/config.example.php as a template)
+backend/config/config.php
+.env
+.env.*
+!.env.example
+
+# Local databases
+backend/data/*.sqlite
+backend/data/*.sqlite-*
+!backend/data/.gitkeep
+
+# Test artifacts & local scratch (contain absolute paths and target-site data)
+test-results/
+playwright-report/
+.insightest-tmp/
+.insightest-ci-*/
+.dotdirtest/
+.slowmo-test/
+scripts/import-report.json
+scripts/r*.xml
+sim.js
+
+# Temporary diagnostic endpoints (not meant for public deployments)
+backend/public/debug.php
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+website/
+scripts/

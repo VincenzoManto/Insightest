@@ -1,0 +1,42 @@
+# Example Azure Pipeline stage wiring up the deterministic CI runner on a self-hosted agent.
+# INSIGHTEST_API_KEY must be a secret pipeline variable (or pulled from an Azure Key Vault
+# variable group) so it never appears in plain text in logs or yaml.
+#
+# Nothing needs to be checked into your repo: the bootstrap script downloads the current
+# runner from Insightest on every run, so it's always up to date. Copy the exact command
+# for your API key from the Insightest app's "API keys" screen.
+trigger: none
+
+pool:
+  name: 'Default' # self-hosted agent pool
+
+steps:
+  - script: |
+      curl -fsSL https://www.insightest.app/app/api/ci-runner/run.sh -o run.sh
+      chmod +x run.sh
+      ./run.sh --key "$INSIGHTEST_API_KEY" --timeout 30000 --resilient --betweenActionMs 1000 --output test-results/junit.xml
+    displayName: 'Run deterministic Playwright suite'
+    env:
+      # Secret pipeline variables must be mapped via `env:`, not `$(...)` macro substitution
+      # in the script text, or they get silently blanked out by Azure DevOps.
+      INSIGHTEST_API_KEY: $(INSIGHTEST_API_KEY)
+
+
+  - task: PublishTestResults@2
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: '**/test-results/*.xml'
+      searchFolder: '$(System.DefaultWorkingDirectory)'
+      mergeTestResults: true
+      failTaskOnFailedTests: false
+    displayName: 'Publish Test Results'
+    condition: succeededOrFailed()
+
+  - task: PublishBuildArtifacts@1
+    inputs:
+      PathtoPublish: '$(System.DefaultWorkingDirectory)/test-results'
+      ArtifactName: 'test-results'
+      publishLocation: 'Container'
+    displayName: 'Publish Test Results as Artifacts'
+    condition: succeededOrFailed()
+

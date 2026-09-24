@@ -1,0 +1,17 @@
+RewriteEngine On
+
+# Some Apache/PHP-CGI setups strip the Authorization header before it reaches PHP;
+# forward it explicitly (needed again here since this is a separate rewrite pass).
+RewriteCond %{HTTP:Authorization} ^(.+)$
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+
+# Route everything through the front controller, except existing files/dirs.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "DENY"
+    Header always set Referrer-Policy "no-referrer"
+</IfModule>

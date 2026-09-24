@@ -1,0 +1,16 @@
+# Lets this whole "backend" folder be dropped anywhere under a web root (e.g.
+# insightest.app/app/api) without needing to change the vhost document root:
+# requests are forwarded internally to public/, everything else is blocked.
+RewriteEngine On
+
+# Some Apache/PHP-CGI setups strip the Authorization header before it reaches PHP;
+# forward it explicitly so Request::bearerToken() can read it.
+RewriteCond %{HTTP:Authorization} ^(.+)$
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+
+# Block direct access to internal folders (source, config, db, data files).
+RewriteRule ^(src|config|db|data)(/|$) - [F,L]
+
+# Forward everything else to public/, where the real front controller lives.
+RewriteCond %{REQUEST_URI} !/public/
+RewriteRule ^(.*)$ public/$1 [L]

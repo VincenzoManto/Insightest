@@ -1,0 +1,20 @@
+{
+  "name": "insightest-ci-runner",
+  "version": "1.0.0",
+  "license": "MIT",
+  "private": true,
+  "description": "Deterministic Playwright test runner, downloaded fresh per-run and authenticated via API key against the PHP backend.",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "insighter": "./runner.js"
+  },
+  "scripts": {
+    "start": "node runner.js"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.47.0"
+  }
+}

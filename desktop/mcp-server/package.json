@@ -1,0 +1,24 @@
+{
+  "name": "insightest-mcp-server",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "description": "Standalone MCP (Model Context Protocol) server exposing Insightest projects/tests/runs/repair to agents like Claude Code.",
+  "main": "dist/mcp-server/index.js",
+  "bin": {
+    "insightest-mcp": "dist/mcp-server/index.js"
+  },
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/mcp-server/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.4"
+  }
+}

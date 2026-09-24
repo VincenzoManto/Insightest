@@ -1,0 +1,83 @@
+{
+  "name": "insightest-desktop",
+  "version": "2.1.6",
+  "license": "MIT",
+  "description": "Desktop app for registering, managing and locally re-running E2E tests.",
+  "main": "dist-electron/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev:renderer": "vite",
+    "dev:electron": "wait-on tcp:6155 && cross-env ELECTRON_RENDERER_URL=http://localhost:6155 electron .",
+    "dev": "npm run build:electron && concurrently -k -n VITE,ELECTRON \"npm:dev:renderer\" \"npm run dev:electron\"",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/liveReporter.js','dist-electron/liveReporter.js')\"",
+    "build": "npm run build:renderer && npm run build:electron",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p electron/tsconfig.json",
+    "dist": "npm run build && electron-builder",
+    "prepack": "npm run build",
+    "pack:check": "npm pack --dry-run",
+    "pack": "npm pack",
+    "release:npm": "npm run typecheck && npm publish --access public"
+  },
+  "dependencies": {
+    "@ia-qa/self-healing": "1.19.1",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@playwright/test": "^1.47.0",
+    "lucide-react": "^1.47.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.25.76",
+    "electron": "^32.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.6.1",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron-builder": "^26.15.3",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2",
+    "wait-on": "^7.2.0"
+  },
+  "author": "Insightest",
+  "build": {
+    "appId": "it.sys.insightest.desktop",
+    "productName": "Insightest",
+    "directories": {
+      "output": "release"
+    },
+    "asar": false,
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "electron/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "bin": {
+    "insightest": "bin/insightest.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "dist-electron",
+    "package.json"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
