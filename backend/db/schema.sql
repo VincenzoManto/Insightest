@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS projects (
     -- Local filesystem path to the app's git repo; used as cwd when delegating repair to an
     -- external coding-agent CLI (Claude Code / GitHub Copilot). Optional.
     repo_path TEXT,
+    -- JSON array: which recorded selector kinds the runner tries, in order (xpath, generalSelector, text, id,
+    -- testIdSelector, attrSelector). NULL = default order (xpath, generalSelector, text, id).
+    selector_priority TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 

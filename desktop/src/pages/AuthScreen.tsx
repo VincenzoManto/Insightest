@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../state/AuthContext';
 import { Brand } from '../components/Brand';
 import { t } from '../i18n';
+import { LanguageSwitcher } from '../components/LanguageSwitcher';
 
 export function AuthScreen(): React.ReactElement {
   const { login, register } = useAuth();
@@ -74,6 +75,9 @@ export function AuthScreen(): React.ReactElement {
             {mode === 'login' ? t('Create a new account') : t('I already have an account')}
           </button>
         </form>
+        <div className="mx-auto mt-5 max-w-[200px]">
+          <LanguageSwitcher />
+        </div>
       </div>
     </div>
   );

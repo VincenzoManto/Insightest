@@ -1,32 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ArrowLeft,
-  Play,
-  Pencil,
-  Wrench,
-  Globe,
-  MousePointerClick,
-  Type,
-  CheckSquare,
-  ChevronDown,
-  Keyboard,
-  Code2,
-  Video,
-  Tag as TagIcon,
-  StickyNote,
-  X,
-  Plus,
-  Save,
-  MoreVertical,
-  FileText,
-  CheckCircle2,
-  XCircle,
-  CircleDot,
-  FolderOpen,
-  Hourglass,
-} from 'lucide-react';
+import { ArrowLeft, Play, Pencil, Wrench, Globe, MousePointerClick, Type, CheckSquare, ChevronDown, ChevronUp, Keyboard, Code2, Video, Tag as TagIcon, StickyNote, X, Plus, Save, MoreVertical, FileText, CheckCircle2, XCircle, CircleDot, FolderOpen, Hourglass } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
-import { computeStepStatuses, type StepStatus } from '../stepStatus';
+import { computeStepStatuses, type StatusStep, type StepStatus } from '../stepStatus';
+import { StepEditorDrawer } from '../components/StepEditorDrawer';
+import { parseSelectorPriority } from '../components/SelectorPriorityEditor';
+import { ACTION_LABEL, META_METHODS, hasSelector, newStep, parseBuilderTest, serializeBuilderTest, stepDetail, stepPrimaryLabel, type EditableStep, type ParsedBuilderTest, type StepAction } from '../stepModel';
 import type { Folder, Project, TestDetail, TestRun, TestRunDetail, TestSummary } from '../types';
 import type { AgentName, HealResult, ResilientStepMeta } from '../electron-bridge';
 import { AiTestAssistant } from './AiTestAssistant';
@@ -79,13 +57,7 @@ function parseSteps(code: string): ParsedStep[] {
       continue;
     }
 
-    const labelMatch =
-      line.match(/getByRole\([^,]+,\s*\{\s*name:\s*['"`]([^'"`]+)['"`]/) ||
-      line.match(/getByText\(\s*['"`]([^'"`]+)['"`]/) ||
-      line.match(/getByLabel\(\s*['"`]([^'"`]+)['"`]/) ||
-      line.match(/getByPlaceholder\(\s*['"`]([^'"`]+)['"`]/) ||
-      line.match(/getByTestId\(\s*['"`]([^'"`]+)['"`]/) ||
-      line.match(/locator\(\s*['"`]([^'"`]+)['"`]/);
+    const labelMatch = line.match(/getByRole\([^,]+,\s*\{\s*name:\s*['"`]([^'"`]+)['"`]/) || line.match(/getByText\(\s*['"`]([^'"`]+)['"`]/) || line.match(/getByLabel\(\s*['"`]([^'"`]+)['"`]/) || line.match(/getByPlaceholder\(\s*['"`]([^'"`]+)['"`]/) || line.match(/getByTestId\(\s*['"`]([^'"`]+)['"`]/) || line.match(/locator\(\s*['"`]([^'"`]+)['"`]/);
     const label = labelMatch?.[1];
     const chain = CHAIN_RE.exec(line)?.[1];
 
@@ -131,6 +103,24 @@ const STEP_ICON: Record<ParsedStep['action'], React.ReactNode> = {
   press: <Keyboard size={14} />,
   wait: <Hourglass size={14} />,
   other: <MoreVertical size={14} />,
+};
+
+/** Icon family for each PlaywrightBuilder action in the step list. */
+const BUILDER_ICON: Record<StepAction, ParsedStep['action']> = {
+  load: 'load',
+  click: 'click',
+  doubleClick: 'click',
+  rightClick: 'click',
+  hover: 'other',
+  fill: 'fill',
+  type: 'fill',
+  clearInput: 'fill',
+  select: 'select',
+  select2: 'select',
+  keydown: 'press',
+  wait: 'wait',
+  resize: 'other',
+  raw: 'other',
 };
 
 const STEP_VERB: Record<ParsedStep['action'], string> = {
@@ -188,12 +178,7 @@ function LastRunsBarChart({ runs }: { runs: TestRun[] }): React.ReactElement {
   return (
     <div className="flex h-24 items-end gap-1">
       {ordered.map((run) => (
-        <div
-          key={run.id}
-          title={`${run.status} — ${formatDateTime(run.created_at)}`}
-          className="flex-1 rounded-t transition-all"
-          style={{ height: '100%', background: statusColor(run.status) }}
-        />
+        <div key={run.id} title={`${run.status} — ${formatDateTime(run.created_at)}`} className="flex-1 rounded-t transition-all" style={{ height: '100%', background: statusColor(run.status) }} />
       ))}
     </div>
   );
@@ -270,14 +255,7 @@ function WeekHeatmap({ runs }: { runs: TestRun[] }): React.ReactElement {
               } else if (hasPassed) {
                 bg = '#0ca30c';
               }
-              return (
-                <div
-                  key={cell.key}
-                  title={`${formatDate(cell.date)} — ${t('{n} run(s)', { n: dayRuns.length })}`}
-                  className="aspect-square rounded-md border border-gridline"
-                  style={{ background: bg }}
-                />
-              );
+              return <div key={cell.key} title={`${formatDate(cell.date)} — ${t('{n} run(s)', { n: dayRuns.length })}`} className="aspect-square rounded-md border border-gridline" style={{ background: bg }} />;
             })}
           </div>
         ))}
@@ -299,17 +277,7 @@ function WeekHeatmap({ runs }: { runs: TestRun[] }): React.ReactElement {
 /** Mirrors electron/agentRepair.ts's prompt shape; kept in the renderer since the actual CLI
  * spawn happens in the main process but the prompt text is assembled from UI-loaded data. */
 function buildAgentRepairPrompt(testName: string, testCode: string, lastRunLog: string | undefined, repoPath: string): string {
-  return [
-    `A Playwright end-to-end test named "${testName}" is failing.`,
-    `The tested application's repository is in this folder: ${repoPath}. ` +
-      'Inspect the application source code (NOT the test) and fix the bug that makes the test fail.',
-    '',
-    "--- Playwright test code (context, do not modify it) ---",
-    testCode,
-    lastRunLog ? `\n--- Log of the last failed run ---\n${lastRunLog}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  return [`A Playwright end-to-end test named "${testName}" is failing.`, `The tested application's repository is in this folder: ${repoPath}. ` + 'Inspect the application source code (NOT the test) and fix the bug that makes the test fail.', '', '--- Playwright test code (context, do not modify it) ---', testCode, lastRunLog ? `\n--- Log of the last failed run ---\n${lastRunLog}` : ''].filter(Boolean).join('\n');
 }
 
 export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: () => void }): React.ReactElement {
@@ -361,34 +329,75 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
   const [tagDraft, setTagDraft] = useState('');
   const [savingTag, setSavingTag] = useState(false);
 
+  // Step editor: tests written against the PlaywrightBuilder engine are parsed into an editable list.
+  // `stepsDraft` holds unsaved changes; null = not a builder test (older page.locator format).
+  const [stepsDraft, setStepsDraft] = useState<ParsedBuilderTest | null>(null);
+  const [stepsDirty, setStepsDirty] = useState(false);
+  const [editStepIndex, setEditStepIndex] = useState<number | null>(null);
+  const [savingSteps, setSavingSteps] = useState(false);
+  useEffect(() => {
+    setStepsDraft(test ? parseBuilderTest(test.playwright_code, test.steps_json) : null);
+    setStepsDirty(false);
+    setEditStepIndex(null);
+  }, [test?.playwright_code, test?.steps_json]);
+  const selectorPriority = useMemo(() => parseSelectorPriority(project?.selector_priority), [project?.selector_priority]);
+
+  function updateSteps(mutate: (steps: EditableStep[]) => EditableStep[]): void {
+    setStepsDraft((d) => (d ? { ...d, steps: mutate(d.steps) } : d));
+    setStepsDirty(true);
+  }
+  function moveStep(i: number, delta: number): void {
+    updateSteps((steps) => {
+      const j = i + delta;
+      if (j < 0 || j >= steps.length) return steps;
+      const next = [...steps];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  }
+  function addStep(): void {
+    const created = newStep('click');
+    updateSteps((steps) => [...steps, created]);
+    setEditStepIndex(stepsDraft ? stepsDraft.steps.length : 0);
+  }
+  async function saveSteps(): Promise<void> {
+    if (!stepsDraft) return;
+    setSavingSteps(true);
+    setError(null);
+    try {
+      const { code, steps } = serializeBuilderTest(stepsDraft, selectorPriority);
+      await api.put(`/tests/${testId}`, { playwright_code: code, steps });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('Unknown error'));
+    } finally {
+      setSavingSteps(false);
+    }
+  }
+  function discardSteps(): void {
+    setStepsDraft(test ? parseBuilderTest(test.playwright_code, test.steps_json) : null);
+    setStepsDirty(false);
+    setEditStepIndex(null);
+  }
+
   async function load(): Promise<void> {
     try {
-      const [testRes, runsRes] = await Promise.all([
-        api.get<TestDetail>(`/tests/${testId}`),
-        api.get<{ runs: TestRun[] }>(`/tests/${testId}/runs`),
-      ]);
+      const [testRes, runsRes] = await Promise.all([api.get<TestDetail>(`/tests/${testId}`), api.get<{ runs: TestRun[] }>(`/tests/${testId}/runs`)]);
       // The API may still be running an older version that doesn't send `tags`/`include_in_ci` yet; normalize so the UI never has to guard for it.
       const normalized: TestDetail = {
         ...testRes,
         tags: testRes.tags ?? [],
         include_in_ci: testRes.include_in_ci ?? true,
         folder_id: testRes.folder_id !== null && testRes.folder_id !== undefined ? Number(testRes.folder_id) : null,
-        depends_on_test_id:
-          testRes.depends_on_test_id !== null && testRes.depends_on_test_id !== undefined ? Number(testRes.depends_on_test_id) : null,
+        depends_on_test_id: testRes.depends_on_test_id !== null && testRes.depends_on_test_id !== undefined ? Number(testRes.depends_on_test_id) : null,
       };
       setTest(normalized);
       setNoteDraft(normalized.notes ?? '');
       setRuns(runsRes.runs);
       // The newest run's log tells which step it stopped on (shown as green/red/grey steps).
       const newest = runsRes.runs.reduce<TestRun | null>((a, r) => (a && a.id > r.id ? a : r), null);
-      setLastRunDetail(
-        newest ? await api.get<TestRunDetail>(`/tests/${testId}/runs/${newest.id}`).catch(() => null) : null
-      );
-      const [foldersRes, testsRes, projectRes] = await Promise.all([
-        api.get<{ folders: Folder[] }>(`/projects/${testRes.project_id}/folders`),
-        api.get<{ tests: TestSummary[] }>(`/projects/${testRes.project_id}/tests`),
-        api.get<Project>(`/projects/${testRes.project_id}`),
-      ]);
+      setLastRunDetail(newest ? await api.get<TestRunDetail>(`/tests/${testId}/runs/${newest.id}`).catch(() => null) : null);
+      const [foldersRes, testsRes, projectRes] = await Promise.all([api.get<{ folders: Folder[] }>(`/projects/${testRes.project_id}/folders`), api.get<{ tests: TestSummary[] }>(`/projects/${testRes.project_id}/tests`), api.get<Project>(`/projects/${testRes.project_id}`)]);
       setProject(projectRes);
       // /folders returns id/parent_id as strings; normalize to numbers to match folder_id comparisons.
       setFolders(
@@ -396,7 +405,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
           ...f,
           id: Number(f.id),
           parent_id: f.parent_id !== null && f.parent_id !== undefined ? Number(f.parent_id) : null,
-        }))
+        })),
       );
       setOtherTests(testsRes.tests.filter((t) => t.id !== testId));
     } catch (err) {
@@ -427,20 +436,17 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
       // code -- a predecessor can itself depend on another test, so this walks the full chain,
       // not just the immediate one.
       const dependencyCodes: string[] = [];
+      const dependencySteps: (ResilientStepMeta[] | null)[] = [];
       const visited = new Set<number>([testId]);
       let nextDependsOn = test.depends_on_test_id;
       while (nextDependsOn !== null && !visited.has(nextDependsOn)) {
         visited.add(nextDependsOn);
         const ancestor = await api.get<TestDetail>(`/tests/${nextDependsOn}`);
         dependencyCodes.unshift(ancestor.playwright_code);
+        dependencySteps.unshift(parseStepsJson(ancestor.steps_json) ?? null);
         nextDependsOn = ancestor.depends_on_test_id ?? null;
       }
-      const result = await window.insightest.playwright.run(
-        test.playwright_code,
-        { headed, betweenActionMs },
-        dependencyCodes,
-        parseStepsJson(test.steps_json)
-      );
+      const result = await window.insightest.playwright.run(test.playwright_code, { headed, betweenActionMs, selectorPriority }, dependencyCodes, parseStepsJson(test.steps_json), dependencySteps);
       setLastLog(result.log);
       await api.post(`/tests/${testId}/runs`, {
         status: result.status,
@@ -678,9 +684,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
   const ciRuns = runs.filter((r) => r.triggered_by === 'ci').length;
   const successRate = totalRuns > 0 ? Math.round((passedRuns / totalRuns) * 100) : null;
   const currentFolder = test.folder_id ? folders.find((f) => f.id === test.folder_id) : undefined;
-  const lastLocalRun = [...runs]
-    .filter((r) => r.triggered_by === 'desktop')
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+  const lastLocalRun = [...runs].filter((r) => r.triggered_by === 'desktop').sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
   // Opting IN to CI/CD requires a green local run; a test already included stays included even if it later fails.
   const canEnableCi = editIncludeInCi || lastLocalRun?.status === 'passed';
 
@@ -694,10 +698,37 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
     })
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-  const steps = parseSteps(test.playwright_code);
-  const stepStatuses: StepStatus[] | null = lastRunDetail
-    ? computeStepStatuses(steps, lastRunDetail.log, lastRunDetail.status)
-    : null;
+  const legacySteps = parseSteps(test.playwright_code);
+  const builderSteps = stepsDraft?.steps ?? null;
+  const viewRows: ParsedStep[] = builderSteps
+    ? builderSteps.map((s) => ({
+        action: BUILDER_ICON[s.action],
+        label: stepPrimaryLabel(s, selectorPriority),
+        detail: stepDetail(s),
+        raw: s.raw ?? s.value,
+        chain: hasSelector(s.action) ? stepPrimaryLabel(s, selectorPriority) : undefined,
+      }))
+    : legacySteps;
+  const steps = viewRows;
+
+  // Run statuses are only meaningful against the saved code: computed over the enabled steps of the saved
+  // list, then mapped back onto the displayed rows (disabled/raw rows get none).
+  let stepStatuses: (StepStatus | undefined)[] | null = null;
+  if (lastRunDetail && !stepsDirty) {
+    if (builderSteps) {
+      const idx = builderSteps.map((_s, i) => i).filter((i) => builderSteps[i].enabled && builderSteps[i].action !== 'raw');
+      const statusSteps: StatusStep[] = idx.map((i) => ({ action: builderSteps[i].action === 'load' ? 'load' : 'other', raw: viewRows[i].raw, chain: viewRows[i].chain }));
+      const st = computeStepStatuses(statusSteps, lastRunDetail.log, lastRunDetail.status);
+      if (st) {
+        stepStatuses = builderSteps.map(() => undefined);
+        idx.forEach((rowIndex, k) => {
+          stepStatuses![rowIndex] = st[k];
+        });
+      }
+    } else {
+      stepStatuses = computeStepStatuses(legacySteps, lastRunDetail.log, lastRunDetail.status);
+    }
+  }
 
   if (editing) {
     return (
@@ -729,11 +760,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
           </label>
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-secondary">
             {t('Folder')}
-            <select
-              value={editFolderId ?? ''}
-              onChange={(e) => setEditFolderId(e.target.value ? Number(e.target.value) : null)}
-              className="w-full"
-            >
+            <select value={editFolderId ?? ''} onChange={(e) => setEditFolderId(e.target.value ? Number(e.target.value) : null)} className="w-full">
               <option value="">{t('(none / root)')}</option>
               {folders.map((f) => (
                 <option key={f.id} value={f.id}>
@@ -744,11 +771,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
           </label>
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-secondary">
             {t('Run first (same session/browser)')}
-            <select
-              value={editDependsOnTestId ?? ''}
-              onChange={(e) => setEditDependsOnTestId(e.target.value ? Number(e.target.value) : null)}
-              className="w-full"
-            >
+            <select value={editDependsOnTestId ?? ''} onChange={(e) => setEditDependsOnTestId(e.target.value ? Number(e.target.value) : null)} className="w-full">
               <option value="">{t('(none)')}</option>
               {otherTests.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -756,25 +779,13 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                 </option>
               ))}
             </select>
-            <span className="text-xs font-normal text-ink-muted">
-              {t("If set, the local run first executes the steps of the chosen test (e.g. a login) in the same session, without duplicating them in this test's code.")}
-            </span>
+            <span className="text-xs font-normal text-ink-muted">{t("If set, the local run first executes the steps of the chosen test (e.g. a login) in the same session, without duplicating them in this test's code.")}</span>
           </label>
           <label className="flex items-center gap-2 text-sm font-medium text-ink-secondary">
-            <input
-              type="checkbox"
-              checked={editIncludeInCi}
-              disabled={!canEnableCi}
-              onChange={(e) => setEditIncludeInCi(e.target.checked)}
-              className="!p-0"
-            />
+            <input type="checkbox" checked={editIncludeInCi} disabled={!canEnableCi} onChange={(e) => setEditIncludeInCi(e.target.checked)} className="!p-0" />
             {t('Include in CI/CD runs')}
           </label>
-          {!canEnableCi && (
-            <p className="-mt-2 text-xs text-ink-muted">
-              {t('The last local run must be passing (green) before this test can be included in CI/CD.')}
-            </p>
-          )}
+          {!canEnableCi && <p className="-mt-2 text-xs text-ink-muted">{t('The last local run must be passing (green) before this test can be included in CI/CD.')}</p>}
           <AiTestAssistant
             mode="fix"
             project={project}
@@ -800,14 +811,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
             {t('Playwright code')}
             <div className="mb-1 flex flex-wrap items-center gap-2">
               <Hourglass size={13} className="text-ink-muted" />
-              <input
-                type="number"
-                min={0}
-                step={100}
-                value={waitMs}
-                onChange={(e) => setWaitMs(Math.max(0, Number(e.target.value) || 0))}
-                className="!w-20 !py-1 !text-xs"
-              />
+              <input type="number" min={0} step={100} value={waitMs} onChange={(e) => setWaitMs(Math.max(0, Number(e.target.value) || 0))} className="!w-20 !py-1 !text-xs" />
               <span className="text-xs text-ink-muted">ms</span>
               <button type="button" className="secondary sm" onClick={insertWaitStep}>
                 <Hourglass size={13} /> {t('Insert wait step')}
@@ -822,6 +826,30 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
   }
 
   return (
+    <>
+          {stepsDraft && editStepIndex !== null && stepsDraft.steps[editStepIndex] && (
+        <StepEditorDrawer
+          key={stepsDraft.steps[editStepIndex].key}
+          step={stepsDraft.steps[editStepIndex]}
+          index={editStepIndex}
+          onClose={() => setEditStepIndex(null)}
+          onApply={(edited) => {
+            const at = editStepIndex;
+            const next: EditableStep = { ...edited };
+            if (next.action === 'raw') {
+              const m = /^\s*await\s+pw\.(\w+)\(/.exec(next.raw ?? '');
+              next.countsMeta = !!m && META_METHODS.includes(m[1]);
+            }
+            updateSteps((all) => all.map((s, i) => (i === at ? next : s)));
+            setEditStepIndex(null);
+          }}
+          onDelete={() => {
+            const at = editStepIndex;
+            updateSteps((all) => all.filter((_, i) => i !== at));
+            setEditStepIndex(null);
+          }}
+        />
+      )}
     <div className="animate-fade-up">
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
@@ -836,9 +864,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                   <FolderOpen size={12} /> {folderPath(currentFolder, folders)}
                 </span>
               )}
-              <span className={test.include_in_ci ? 'text-good' : 'text-ink-muted'}>
-                {test.include_in_ci ? '● ' + t('Included in CI/CD') : '○ ' + t('Excluded from CI/CD')}
-              </span>
+              <span className={test.include_in_ci ? 'text-good' : 'text-ink-muted'}>{test.include_in_ci ? '● ' + t('Included in CI/CD') : '○ ' + t('Excluded from CI/CD')}</span>
             </div>
           </div>
         </div>
@@ -849,14 +875,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
           </label>
           <label className="flex items-center gap-1.5 text-xs text-ink-secondary" title={t('Pause between actions during the local run, so you can follow it by eye')}>
             <Hourglass size={13} />
-            <input
-              type="number"
-              min={0}
-              step={100}
-              value={betweenActionMs}
-              onChange={(e) => setBetweenActionMs(Math.max(0, Number(e.target.value) || 0))}
-              className="!w-16 !py-1 !text-xs"
-            />
+            <input type="number" min={0} step={100} value={betweenActionMs} onChange={(e) => setBetweenActionMs(Math.max(0, Number(e.target.value) || 0))} className="!w-16 !py-1 !text-xs" />
             {t('ms/action')}
           </label>
           <button onClick={runLocally} disabled={running}>
@@ -870,10 +889,23 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
 
       {error && <div className="error-banner">{error}</div>}
 
+
+
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="card">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-semibold text-ink-primary">{steps.length > 0 ? t('{n} actions', { n: steps.length }) : t('Test code')}</div>
+            {stepsDirty && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-warning">{t('Unsaved changes')}</span>
+                <button className="secondary sm" onClick={discardSteps} disabled={savingSteps}>
+                  {t('Discard')}
+                </button>
+                <button className="sm" onClick={saveSteps} disabled={savingSteps}>
+                  <Save size={13} /> {savingSteps ? t('Saving…') : t('Save')}
+                </button>
+              </div>
+            )}
             {steps.length > 0 && (
               <button className="secondary sm" onClick={() => setShowCode((v) => !v)}>
                 <Code2 size={13} /> {showCode ? t('Hide code') : t('Show code')}
@@ -882,45 +914,58 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
           </div>
 
           {steps.length === 0 || showCode ? (
-            <pre className="codeblock m-0 !text-ink-primary">
-              {test.playwright_code}
-            </pre>
+            <pre className="codeblock m-0 !text-ink-primary">{test.playwright_code}</pre>
           ) : (
             <div className="flex flex-col">
               {steps.map((step, i) => {
                 const status = stepStatuses?.[i];
-                const chipClass =
-                  status === 'passed'
-                    ? 'bg-good/15 text-good'
-                    : status === 'failed'
-                      ? 'bg-critical/15 text-critical'
-                      : status === 'skipped'
-                        ? 'bg-page text-ink-muted'
-                        : 'bg-accent/15 text-accent-700';
+                const chipClass = status === 'passed' ? 'bg-good/15 text-good' : status === 'failed' ? 'bg-critical/15 text-critical' : status === 'skipped' ? 'bg-page text-ink-muted' : 'bg-accent/15 text-accent-700';
                 return (
-                <div
-                  key={i}
-                  title={status === 'passed' ? t('Executed') : status === 'failed' ? t('Failed step') : status === 'skipped' ? t('Not executed') : undefined}
-                  className={`flex min-w-0 items-start gap-3 border-b border-gridline py-2.5 last:border-b-0 ${status === 'skipped' ? 'opacity-50' : ''}`}
-                >
-                  <span className="w-5 flex-shrink-0 pt-1 text-right text-xs text-ink-muted">{i + 1}</span>
-                  <span className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg ${chipClass}`}>
-                    {STEP_ICON[step.action]}
-                  </span>
-                  <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-1 pt-0.5">
-                    <span className="text-sm font-semibold text-ink-primary">{STEP_VERB[step.action]}</span>
-                    <span className="min-w-0 max-w-full break-all rounded-md bg-page px-2 py-0.5 text-xs text-ink-secondary" title={step.label}>
-                      {step.label}
-                    </span>
-                    {step.detail && <span className="min-w-0 max-w-full break-all text-xs text-ink-muted">→ "{step.detail}"</span>}
+                  <div
+                    key={i}
+                    title={status === 'passed' ? t('Executed') : status === 'failed' ? t('Failed step') : status === 'skipped' ? t('Not executed') : undefined}
+                    onClick={builderSteps ? () => setEditStepIndex(i) : undefined}
+                    className={`flex min-w-0 items-start gap-3 border-b border-gridline py-2.5 last:border-b-0 ${status === 'skipped' ? 'opacity-50' : ''} ${builderSteps ? 'cursor-pointer rounded-md px-1 hover:bg-page' : ''} ${builderSteps && !builderSteps[i].enabled ? 'opacity-40' : ''}`}
+                  >
+                    <span className="w-5 flex-shrink-0 pt-1 text-right text-xs text-ink-muted">{i + 1}</span>
+                    <span className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg ${chipClass}`}>{STEP_ICON[step.action]}</span>
+                    <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-1 pt-0.5">
+                      <span className="text-sm font-semibold text-ink-primary">
+                        {builderSteps ? t(ACTION_LABEL[builderSteps[i].action]) : STEP_VERB[step.action]}
+                        {builderSteps && !builderSteps[i].enabled ? ` (${t('disabled')})` : ''}
+                      </span>
+                      <span className="min-w-0 max-w-full break-all rounded-md bg-page px-2 py-0.5 text-xs text-ink-secondary" title={step.label}>
+                        {step.label}
+                      </span>
+                      {step.detail && <span className="min-w-0 max-w-full break-all text-xs text-ink-muted">→ "{step.detail}"</span>}
+                    </div>
+                    {builderSteps && (
+                      <div className="flex flex-shrink-0 items-center" onClick={(e) => e.stopPropagation()}>
+                        <button className="secondary icon !h-6 !w-6" disabled={i === 0} onClick={() => moveStep(i, -1)} title={t('Move up')}>
+                          <ChevronUp size={13} />
+                        </button>
+                        <button className="secondary icon !h-6 !w-6" disabled={i === builderSteps.length - 1} onClick={() => moveStep(i, 1)} title={t('Move down')}>
+                          <ChevronDown size={13} />
+                        </button>
+                      </div>
+                    )}
+                    {status === 'failed' && <XCircle size={14} className="mt-1.5 flex-shrink-0 text-critical" />}
+                    {status === 'passed' && <CheckCircle2 size={14} className="mt-1.5 flex-shrink-0 text-good" />}
                   </div>
-                  {status === 'failed' && <XCircle size={14} className="mt-1.5 flex-shrink-0 text-critical" />}
-                  {status === 'passed' && <CheckCircle2 size={14} className="mt-1.5 flex-shrink-0 text-good" />}
-                </div>
                 );
               })}
             </div>
           )}
+
+          {stepsDraft && !showCode && (
+            <div className="mt-3">
+              <button className="secondary sm" onClick={addStep}>
+                <Plus size={13} /> {t('Add step')}
+              </button>
+              <span className="ml-3 text-xs text-ink-muted">{t('Click a step to edit its action and selectors.')}</span>
+            </div>
+          )}
+          {!stepsDraft && legacySteps.length > 0 && <div className="mt-3 text-xs text-ink-muted">{t('This test uses the older recording format: re-import it (--update) to edit its steps here.')}</div>}
 
           {(running || repairingRunId !== null || liveLines.length > 0) && (
             <div className="mt-4">
@@ -928,10 +973,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                 {(running || repairingRunId !== null) && <CircleDot size={13} className="text-accent2" />}
                 {running || repairingRunId !== null ? t('Steps in progress') : t('Steps of the last run')}
               </div>
-              <div
-                ref={liveLogRef}
-                className="codeblock max-h-64"
-              >
+              <div ref={liveLogRef} className="codeblock max-h-64">
                 {liveLines.length > 0 ? liveLines.join('\n') : t('Waiting for the first step…')}
               </div>
             </div>
@@ -950,13 +992,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
             <div className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
               <StickyNote size={15} /> {t('Test notes')}
             </div>
-            <textarea
-              value={noteDraft}
-              onChange={(e) => setNoteDraft(e.target.value)}
-              rows={4}
-              placeholder={t('Add a note…')}
-              className="w-full"
-            />
+            <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} rows={4} placeholder={t('Add a note…')} className="w-full" />
             {noteDraft !== (test.notes ?? '') && (
               <button className="sm mt-2" onClick={saveNote} disabled={savingNote}>
                 <Save size={13} /> {savingNote ? t('Saving…') : t('Save note')}
@@ -971,11 +1007,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
               {test.tags.map((tag) => (
                 <span key={tag} className="badge badge-muted max-w-full break-all">
                   {tag}
-                  <button
-                    type="button"
-                    onClick={() => removeTag(tag)}
-                    className="ghost !h-3.5 !w-3.5 !rounded-full !p-0"
-                  >
+                  <button type="button" onClick={() => removeTag(tag)} className="ghost !h-3.5 !w-3.5 !rounded-full !p-0">
                     <X size={11} />
                   </button>
                 </span>
@@ -1086,44 +1118,23 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                     <span className="ml-auto text-xs text-ink-muted">{formatDateTime(run.created_at)}</span>
                     {(run.status === 'failed' || run.status === 'error') && (
                       <>
-                        <button
-                          className="secondary !px-2 !py-1 text-xs"
-                          onClick={() => analyzeHealing(run.id)}
-                          disabled={healingRunId === run.id}
-                        >
+                        <button className="secondary !px-2 !py-1 text-xs" onClick={() => analyzeHealing(run.id)} disabled={healingRunId === run.id}>
                           <Wrench size={12} /> {healingRunId === run.id ? t('Analyzing…') : t('Analyze')}
                         </button>
-                        <button
-                          className="secondary !px-2 !py-1 text-xs"
-                          onClick={() => repairTest(run.id)}
-                          disabled={repairingRunId === run.id || !project?.base_url}
-                          title={!project?.base_url ? t('Set a base URL for the project to enable self-healing') : undefined}
-                        >
+                        <button className="secondary !px-2 !py-1 text-xs" onClick={() => repairTest(run.id)} disabled={repairingRunId === run.id || !project?.base_url} title={!project?.base_url ? t('Set a base URL for the project to enable self-healing') : undefined}>
                           <Wrench size={12} /> {repairingRunId === run.id ? t('Repairing…') : t('Repair')}
                         </button>
                         {(['claude', 'copilot'] as AgentName[])
                           .filter((a) => installedAgents[a])
                           .map((a) => (
-                            <button
-                              key={a}
-                              className="secondary !px-2 !py-1 text-xs"
-                              onClick={() => setAgentToConfirm({ agent: a, runId: run.id })}
-                              disabled={agentRunning || !project?.repo_path}
-                              title={
-                                !project?.repo_path
-                                  ? t('Set the local repo path for the project (Projects screen)')
-                                  : undefined
-                              }
-                            >
+                            <button key={a} className="secondary !px-2 !py-1 text-xs" onClick={() => setAgentToConfirm({ agent: a, runId: run.id })} disabled={agentRunning || !project?.repo_path} title={!project?.repo_path ? t('Set the local repo path for the project (Projects screen)') : undefined}>
                               <Wrench size={12} /> {t('Delegate to {agent}', { agent: a === 'claude' ? 'Claude Code' : 'Copilot' })}
                             </button>
                           ))}
                         {agentToConfirm?.runId === run.id && (
                           <div className="modal-overlay" onClick={() => setAgentToConfirm(null)}>
                             <div className="modal" onClick={(e) => e.stopPropagation()}>
-                              <p className="text-sm font-semibold text-ink-primary">
-                                {t('Run {agent}?', { agent: agentToConfirm.agent === 'claude' ? 'Claude Code' : 'GitHub Copilot' })}
-                              </p>
+                              <p className="text-sm font-semibold text-ink-primary">{t('Run {agent}?', { agent: agentToConfirm.agent === 'claude' ? 'Claude Code' : 'GitHub Copilot' })}</p>
                               <p className="mt-2 text-xs text-ink-secondary">
                                 {t('It will run locally in the folder {path} and may modify/commit repository files to fix the bug that makes this test fail.', {
                                   path: project?.repo_path ?? '',
@@ -1165,16 +1176,8 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
               <p className="whitespace-pre-wrap break-words text-xs text-ink-secondary">{repairResult.summary}</p>
               {repairResult.status === 'healed' && repairResult.proposedCode && (
                 <>
-                  <p className="mt-2 text-xs text-ink-muted">
-                    {repairResult.verified
-                      ? t('✅ The repaired version was re-run and passes.')
-                      : t('⚠️ The repaired version has not been verified (yet): re-run it before trusting it.')}
-                  </p>
-                  <pre
-                    className="codeblock mt-2 max-h-64 !text-ink-primary"
-                  >
-                    {repairResult.proposedCode}
-                  </pre>
+                  <p className="mt-2 text-xs text-ink-muted">{repairResult.verified ? t('✅ The repaired version was re-run and passes.') : t('⚠️ The repaired version has not been verified (yet): re-run it before trusting it.')}</p>
+                  <pre className="codeblock mt-2 max-h-64 !text-ink-primary">{repairResult.proposedCode}</pre>
                   <div className="mt-2 flex gap-2">
                     <button className="!px-2 !py-1 text-xs" onClick={applyRepair}>
                       {t('Apply repair')}
@@ -1200,9 +1203,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                   code: agentResult.exitCode ?? '—',
                 })}
               </p>
-              <pre className="codeblock mt-2 max-h-64">
-                {agentResult.log}
-              </pre>
+              <pre className="codeblock mt-2 max-h-64">{agentResult.log}</pre>
             </div>
           )}
         </div>
@@ -1250,13 +1251,10 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
           <div className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
             <FileText size={15} /> {t('Documentation')}
           </div>
-          {test.prompt ? (
-            <p className="whitespace-pre-wrap text-sm text-ink-secondary">{test.prompt}</p>
-          ) : (
-            <p className="text-sm text-ink-muted">{t('No documentation available for this test.')}</p>
-          )}
+          {test.prompt ? <p className="whitespace-pre-wrap text-sm text-ink-secondary">{test.prompt}</p> : <p className="text-sm text-ink-muted">{t('No documentation available for this test.')}</p>}
         </div>
       )}
     </div>
+    </>
   );
 }

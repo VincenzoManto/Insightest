@@ -35,6 +35,16 @@ class LiveReporter {
   onTestEnd(test, result) {
     const tick = result.status === 'passed' ? '✓' : '✗';
     console.log(`${tick} ${test.title} (${result.duration}ms)`);
+    // Say WHY it failed: a run that dies before its first step otherwise shows only a bare ✗.
+    if (result.status !== 'passed' && result.error && result.error.message) {
+      console.log(
+        String(result.error.message)
+          .split('\n')
+          .slice(0, 8)
+          .map((l) => `    ${l}`)
+          .join('\n')
+      );
+    }
   }
 }
 

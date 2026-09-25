@@ -26,6 +26,7 @@ foreach ([
     ['tests', 'depends_on_test_id', 'INTEGER'],
     ['projects', 'base_url', 'TEXT'],
     ['projects', 'repo_path', 'TEXT'],
+    ['projects', 'selector_priority', 'TEXT'],
 ] as [$table, $column, $definition]) {
     $existing = array_column($pdo->query('PRAGMA table_info(' . $table . ')')->fetchAll(), 'name');
     if (!in_array($column, $existing, true)) {

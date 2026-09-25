@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { m } from './messages';
 
 export type AgentName = 'claude' | 'copilot';
 
@@ -204,7 +205,7 @@ function describeStreamEvent(evt: any): string[] {
     }
   } else if (evt?.type === 'user') {
     for (const block of evt.message?.content ?? []) {
-      if (block.type === 'tool_result' && block.is_error) out.push('⚠️ un tool ha restituito un errore');
+      if (block.type === 'tool_result' && block.is_error) out.push(m('⚠️ a tool returned an error'));
     }
   }
   return out;
@@ -230,7 +231,7 @@ export function cancelAiTestRequest(): boolean {
 /** Runs Claude Code in print mode (prompt on stdin, streamed JSON events) to write or fix a
  * test and returns the proposed code without touching the repo or the stored test. */
 export function runAiTestRequest(req: AiTestRequest, onLine?: (line: string) => void): Promise<AiTestResult> {
-  if (currentAiChild) return Promise.reject(new Error('Una richiesta a Claude è già in corso'));
+  if (currentAiChild) return Promise.reject(new Error(m('A Claude request is already in progress')));
   // Claude always gets a Playwright browser: an app-provided MCP server is injected via
   // --mcp-config (a file, since inline JSON doesn't survive shell quoting on Windows), so this
   // works whether or not the user registered a Playwright MCP themselves.

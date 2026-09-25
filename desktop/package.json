@@ -10,7 +10,7 @@
     "dev:electron": "wait-on tcp:6155 && cross-env ELECTRON_RENDERER_URL=http://localhost:6155 electron .",
     "dev": "npm run build:electron && concurrently -k -n VITE,ELECTRON \"npm:dev:renderer\" \"npm run dev:electron\"",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/liveReporter.js','dist-electron/liveReporter.js')\"",
+    "build:electron": "tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/liveReporter.js','dist-electron/liveReporter.js');require('fs').copyFileSync('electron/pwBuilder.js','dist-electron/pwBuilder.js')\"",
     "build": "npm run build:renderer && npm run build:electron",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p electron/tsconfig.json",

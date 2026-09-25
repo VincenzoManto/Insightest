@@ -10,6 +10,7 @@ import { ProjectsScreen } from './pages/ProjectsScreen';
 import { TestsScreen } from './pages/TestsScreen';
 import { Brand } from './components/Brand';
 import { t } from './i18n';
+import { LanguageSwitcher } from './components/LanguageSwitcher';
 import type { Organization, Project, SharedProject } from './types';
 
 function NavItem({
@@ -119,6 +120,10 @@ export function App(): React.ReactElement {
         </nav>
 
         <div className="flex-1" />
+
+        <div className="mb-2 px-1">
+          <LanguageSwitcher dark />
+        </div>
 
         <div className="flex items-center gap-2.5 rounded-xl border border-sidebar-border px-2.5 py-2">
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-accent-300 to-accent-600 text-xs font-bold text-ink-primary">

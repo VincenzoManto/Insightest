@@ -40,7 +40,7 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 cd "$WORK_DIR"
 
-for f in runner.js playwright.config.js liveReporter.js package.json; do
+for f in runner.js pwBuilder.js playwright.config.js liveReporter.js package.json; do
   curl -fsSL "$BASE_URL/ci-runner/$f" -o "$f"
 done
 

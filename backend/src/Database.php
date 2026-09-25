@@ -39,6 +39,7 @@ final class Database
             self::ensureColumn($pdo, 'tests', 'depends_on_test_id', 'INTEGER');
             self::ensureColumn($pdo, 'projects', 'base_url', 'TEXT');
             self::ensureColumn($pdo, 'projects', 'repo_path', 'TEXT');
+            self::ensureColumn($pdo, 'projects', 'selector_priority', 'TEXT');
 
             self::$instance = $pdo;
         }

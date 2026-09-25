@@ -17,6 +17,8 @@ export interface Project {
   base_url: string | null;
   /** Local filesystem path to the app's git repo; used as cwd when delegating repair to an external coding-agent CLI. */
   repo_path: string | null;
+  /** JSON array of selector kinds in the order the runner tries them; null = default (xpath, generalSelector, text, id). */
+  selector_priority: string | null;
   created_at: string;
 }
 

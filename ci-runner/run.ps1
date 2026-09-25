@@ -37,7 +37,7 @@ New-Item -ItemType Directory -Path $workDir | Out-Null
 
 try {
     Set-Location $workDir
-    foreach ($file in @('runner.js', 'playwright.config.js', 'liveReporter.js', 'package.json')) {
+    foreach ($file in @('runner.js', 'pwBuilder.js', 'playwright.config.js', 'liveReporter.js', 'package.json')) {
         Invoke-WebRequest -Uri "$baseUrl/ci-runner/$file" -OutFile $file
     }
 

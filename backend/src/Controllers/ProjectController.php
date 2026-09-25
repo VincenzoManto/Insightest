@@ -11,6 +11,30 @@ use App\Validator;
 
 final class ProjectController
 {
+    private const SELECTOR_KEYS = ['xpath', 'generalSelector', 'text', 'id', 'testIdSelector', 'attrSelector'];
+
+    /** Validated `selector_priority` (JSON-encoded ordered list of selector kinds), or null for "use the default". */
+    private static function selectorPriority(array $body): ?string
+    {
+        $value = $body['selector_priority'] ?? null;
+        if ($value === null || $value === '' || $value === []) {
+            return null;
+        }
+        if (is_string($value)) {
+            $value = json_decode($value, true);
+        }
+        if (!is_array($value)) {
+            throw new HttpException('selector_priority must be an array of selector kinds', 422);
+        }
+        $value = array_values(array_unique($value));
+        foreach ($value as $key) {
+            if (!is_string($key) || !in_array($key, self::SELECTOR_KEYS, true)) {
+                throw new HttpException('selector_priority: unknown selector kind (allowed: ' . implode(', ', self::SELECTOR_KEYS) . ')', 422);
+            }
+        }
+        return json_encode($value);
+    }
+
     public static function index(Request $req): void
     {
         $orgId = (int) $req->params['orgId'];
@@ -29,10 +53,11 @@ final class ProjectController
         Validator::required($req->body, ['name']);
         $baseUrl = isset($req->body['base_url']) && $req->body['base_url'] !== '' ? (string) $req->body['base_url'] : null;
         $repoPath = isset($req->body['repo_path']) && $req->body['repo_path'] !== '' ? (string) $req->body['repo_path'] : null;
+        $selectorPriority = self::selectorPriority($req->body);
         $pdo = Database::pdo();
-        $pdo->prepare('INSERT INTO projects (org_id, name, base_url, repo_path) VALUES (?, ?, ?, ?)')->execute([$orgId, $req->body['name'], $baseUrl, $repoPath]);
+        $pdo->prepare('INSERT INTO projects (org_id, name, base_url, repo_path, selector_priority) VALUES (?, ?, ?, ?, ?)')->execute([$orgId, $req->body['name'], $baseUrl, $repoPath, $selectorPriority]);
 
-        Response::json(['id' => (int) $pdo->lastInsertId(), 'org_id' => $orgId, 'name' => $req->body['name'], 'base_url' => $baseUrl, 'repo_path' => $repoPath], 201);
+        Response::json(['id' => (int) $pdo->lastInsertId(), 'org_id' => $orgId, 'name' => $req->body['name'], 'base_url' => $baseUrl, 'repo_path' => $repoPath, 'selector_priority' => $selectorPriority], 201);
     }
 
     public static function show(Request $req): void
@@ -57,8 +82,14 @@ final class ProjectController
         Validator::required($req->body, ['name']);
         $baseUrl = isset($req->body['base_url']) && $req->body['base_url'] !== '' ? (string) $req->body['base_url'] : null;
         $repoPath = isset($req->body['repo_path']) && $req->body['repo_path'] !== '' ? (string) $req->body['repo_path'] : null;
-        Database::pdo()->prepare('UPDATE projects SET name = ?, base_url = ?, repo_path = ? WHERE id = ?')
+        $pdo = Database::pdo();
+        $pdo->prepare('UPDATE projects SET name = ?, base_url = ?, repo_path = ? WHERE id = ?')
             ->execute([$req->body['name'], $baseUrl, $repoPath, $projectId]);
+        // Only touched when the client sends it, so older clients editing a project don't reset the priority.
+        if (array_key_exists('selector_priority', $req->body)) {
+            $pdo->prepare('UPDATE projects SET selector_priority = ? WHERE id = ?')
+                ->execute([self::selectorPriority($req->body), $projectId]);
+        }
 
         Response::json(['ok' => true]);
     }

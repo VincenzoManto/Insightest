@@ -29,6 +29,13 @@ class LiveReporter {
         this.pending = [];
     }
 
+    // Without this, load/compile errors in the generated spec (e.g. one test with invalid code)
+    // are swallowed and the run silently reports zero tests.
+    onError(error) {
+        console.error(`${RED}[insightest] Playwright error: ${error.message || error}${RESET}`);
+        if (error.stack) console.error(error.stack);
+    }
+
     onTestBegin(test) {
         console.log(`\n${DIM}▶ ${test.title}${RESET}`);
     }
@@ -37,6 +44,8 @@ class LiveReporter {
         // 'pw:api' (page.goto/click/...) and 'expect' are the actions/assertions a recorded
         // test is actually made of; 'hook'/'fixture'/etc. are internal plumbing noise.
         if (step.category !== 'pw:api' && step.category !== 'expect') return;
+        // Select2 option polling emits dozens of Evaluate/Wait steps per action; hide that noise.
+        if (!step.error && (step.title === 'Evaluate' || step.title === 'Wait for timeout')) return;
         const tick = step.error ? `${RED}✗${RESET}` : `${GREEN}✓${RESET}`;
         console.log(`    ${tick} ${step.title}`);
     }
@@ -65,6 +74,11 @@ class LiveReporter {
         const outcome =
             result.status === 'passed' ? `${GREEN}succeeded${RESET}` : result.status === 'skipped' ? `${YELLOW}skipped${RESET}` : `${RED}failed${RESET}`;
         console.log(`[insightest] ${name} ${outcome} ${DIM}(${result.duration}ms)${RESET}`);
+        // Say WHY it failed: a test that dies before its first step otherwise shows only "failed".
+        if (result.status !== 'passed' && result.status !== 'skipped' && result.error && result.error.message) {
+            const reason = String(result.error.message).split('\n').slice(0, 6).map((l) => `      ${l}`).join('\n');
+            console.log(`${RED}${reason}${RESET}`);
+        }
         this.publish(test, result);
     }
 

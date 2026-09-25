@@ -10,6 +10,10 @@
 // escalates 8000/15000/20000ms); does not affect other action retries.
 // --runfailed: only reruns tests whose last CI run failed/errored, plus any prerequisite test
 // (depends_on_test_id chain) needed to reach them -- instead of the whole suite.
+//
+// NOTE: this file is served statically from backend/public/ci-runner/ (see .htaccess), and is
+// downloaded fresh by run.ps1/run.sh/run.cmd on every CI invocation -- it is a mirror of
+// ci-runner/runner.js in this repo and should be kept in sync with it.
 'use strict';
 
 const fs = require('fs');
@@ -67,6 +71,23 @@ function parseArgs(argv) {
     return args;
 }
 
+/** Stable topological order: each test is preceded by its whole depends_on_test_id chain (oldest ancestor first);
+ * tests with no relation keep their relative order. A cycle or a missing prerequisite never blocks the run. */
+function orderByDependencies(list) {
+    const byId = new Map(list.map((t) => [t.id, t]));
+    const seen = new Set();
+    const out = [];
+    const visit = (t) => {
+        if (seen.has(t.id)) return;
+        seen.add(t.id);
+        const dep = t.depends_on_test_id != null ? byId.get(t.depends_on_test_id) : null;
+        if (dep) visit(dep);
+        out.push(t);
+    };
+    list.forEach(visit);
+    return out;
+}
+
 function requireValue(value, label) {
     if (!value) {
         console.error(`Missing required value: ${label}`);
@@ -112,13 +133,54 @@ async function apiRequest(baseUrl, apiKey, method, urlPath, body) {
 function extractTestBody(code) {
     const markerMatch = /async\s*\([^)]*\)\s*=>\s*\{/.exec(code);
     if (!markerMatch) throw new Error('Could not locate test body in recorded code');
+    const start = markerMatch.index + markerMatch[0].length;
     let depth = 1;
-    let i = markerMatch.index + markerMatch[0].length;
+    let i = start;
+    // Braces inside string literals / comments (e.g. a selector like "text={x}") must not count.
+    // Template literals with ${...} are tracked with a stack so their inner braces balance too.
+    const tpl = [];
     for (; i < code.length && depth > 0; i++) {
-        if (code[i] === '{') depth++;
-        else if (code[i] === '}') depth--;
+        const c = code[i];
+        const n = code[i + 1];
+        if (c === '/' && n === '/') { while (i < code.length && code[i] !== '\n') i++; continue; }
+        if (c === '/' && n === '*') { i = code.indexOf('*/', i + 2); if (i < 0) break; i++; continue; }
+        if (c === '"' || c === "'") {
+            for (i++; i < code.length && code[i] !== c && code[i] !== '\n'; i++) if (code[i] === '\\') i++;
+            continue;
+        }
+        if (c === '`' || (c === '}' && tpl.length && tpl[tpl.length - 1] === depth)) {
+            if (c === '}') tpl.pop();
+            for (i++; i < code.length && code[i] !== '`'; i++) {
+                if (code[i] === '\\') { i++; continue; }
+                if (code[i] === '$' && code[i + 1] === '{') { tpl.push(depth); depth++; i++; break; }
+            }
+            continue;
+        }
+        if (c === '{') depth++;
+        else if (c === '}') depth--;
     }
-    return code.slice(markerMatch.index + markerMatch[0].length, i - 1);
+    if (depth > 0) throw new Error('Unbalanced braces in recorded code (test body never closes)');
+    return code.slice(start, i - 1);
+}
+
+/** Real syntax check (V8 parse only, nothing runs): returns null when `code` parses inside an async
+ * function, else the syntax error message. TypeScript-only syntax is retried with types stripped
+ * (when this Node has module.stripTypeScriptTypes) so recordings that use it aren't skipped by mistake. */
+function syntaxError(code) {
+    const parse = (src) => new (require('vm').Script)('(async () => {\n' + src + '\n})');
+    try {
+        parse(code);
+        return null;
+    } catch (e) {
+        try {
+            const strip = require('module').stripTypeScriptTypes;
+            if (strip) {
+                parse(strip(code));
+                return null;
+            }
+        } catch {}
+        return e.message;
+    }
 }
 
 /** Recovers the numeric test id embedded in a combined-spec test title, e.g. "Login (id 12)". */
@@ -138,7 +200,7 @@ function extractPreamble(code) {
     if (!testCallMatch) return '';
     return code
         .slice(0, testCallMatch.index)
-        .replace(/^\s*import\s.*?;\s*/s, '')
+        .replace(/^\s*import\s[^;]*;\s*/gm, '')
         .trim();
 }
 
@@ -177,9 +239,8 @@ function select2ByText(chain, meta) {
   const text = meta && meta.textHint ? String(meta.textHint).trim() : '';
   if (!m || !text) return null;
   const quoted = JSON.stringify(text);
-  const exactSel = '.select2-results__option:visible:text-is(' + quoted + ')';
   return {
-    chain: 'page.locator(' + JSON.stringify(exactSel) + ').first()',
+    chain: '__insightestSelect2Option(page, ' + quoted + ')',
     meta: {
       ...meta,
       secondarySelectors: [
@@ -191,24 +252,96 @@ function select2ByText(chain, meta) {
   };
 }
 
+// Per-project selector priority (projects.selector_priority, sent by /ci/tests on every test). Steps imported
+// with `byKey` (all recorded selectors) are re-ranked by it at run time; older steps keep their baked order.
+const DEFAULT_SELECTOR_PRIORITY = ['xpath', 'generalSelector', 'text', 'id'];
+function parseSelectorPriority(raw) {
+    try {
+        const v = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (Array.isArray(v)) {
+            const keys = v.filter((k) => typeof k === 'string');
+            if (keys.length) return keys;
+        }
+    } catch {}
+    return DEFAULT_SELECTOR_PRIORITY;
+}
+
+/** Rebuilds a step's primary locator + fallbacks from its recorded candidates in `priority` order. For select2
+ * option clicks the text-based smart pick (__insightestSelect2Option) is kept, but only as the LAST resort, so the
+ * configured order is honored. Returns null when the step has no `byKey` (recorded before this feature). */
+function applyProjectPriority(chain, meta, priority) {
+    const byKey = meta && meta.byKey;
+    if (!byKey) return null;
+    const cands = [];
+    for (const key of priority) {
+        if (key === 'text') {
+            if (byKey.text) cands.push({ expr: 'page.getByText(' + JSON.stringify(byKey.text) + ')', raw: 'text=' + JSON.stringify(byKey.text) });
+        } else if (byKey[key]) {
+            cands.push({ expr: 'page.locator(' + JSON.stringify(byKey[key]) + ')', raw: byKey[key] });
+        }
+    }
+    if (!cands.length) return null;
+    const secondary = cands.slice(1).map((c) => c.raw);
+    if (chain.includes('select2-results__option') && byKey.text) secondary.push('select2text:' + JSON.stringify(byKey.text));
+    return { chain: cands[0].expr, meta: { ...meta, secondarySelectors: secondary } };
+}
+
+// Recorded select2 option clicks come in two more shapes, both WITHOUT :visible, so .first()/.nth() can land on a
+// hidden leftover option from an earlier dropdown and time out on click. Rewrite them to visible-scoped picks.
+const SELECT2_FILTER_CHAIN_RE = /^page\.locator\((['"])\.select2-results__option\1\)\.filter\(\{ hasText: ("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*') \}\)\.first\(\)$/;
+const SELECT2_NTH_CHAIN_RE = /^page\.locator\((['"])\.select2-results__option\1\)\.nth\((\d+)\)$/;
+function normalizeSelect2Chain(chain) {
+  const c = chain.trim();
+  const f = SELECT2_FILTER_CHAIN_RE.exec(c);
+  if (f) return '__insightestSelect2Option(page, ' + f[2] + ')';
+  const n = SELECT2_NTH_CHAIN_RE.exec(c);
+  if (n) return "page.locator('.select2-results__option:visible').nth(" + n[2] + ')';
+  return chain;
+}
+
 /** Rewrites each recorded action call into a call to the resilient-action engine (defined once in
  * the generated suite via __insightestAction), passing that step's own recorded metadata (secondary
  * selectors from steps_json, when the test was recorded with the augmentation pass) positionally --
  * step order here must match the order selectors were captured in at record time. `steps` is the
  * parsed steps_json array for this one test, or null for tests recorded before this feature (still
  * get attempt-1/attempt-2 retry, just no attempt-3 selector fallback). */
-function instrumentResilientActions(code, steps) {
+function instrumentResilientActions(code, steps, priority = DEFAULT_SELECTOR_PRIORITY) {
     let stepIndex = 0;
     return code.replace(ACTION_LINE_RE, (full, indent, chain, action, argsText) => {
         const label = ACTION_LABELS[action] || action;
         let meta = (steps && steps[stepIndex]) || null;
         stepIndex++;
-        const byText = action === 'click' ? select2ByText(chain, meta) : null;
+        if (action === 'click') chain = normalizeSelect2Chain(chain);
+        const ranked = applyProjectPriority(chain, meta, priority);
+        if (ranked) {
+            chain = ranked.chain;
+            meta = ranked.meta;
+        }
+        const byText = !ranked && action === 'click' ? select2ByText(chain, meta) : null;
         if (byText) {
             chain = byText.chain;
             meta = byText.meta;
         }
         return `${indent}await __insightestAction(page, () => ${chain}, ${JSON.stringify(chain.trim())}, (___loc) => ___loc.${action}(${argsText}), ${JSON.stringify(label)}, ${JSON.stringify(meta)});`;
+    });
+}
+
+// Tests written against the PlaywrightBuilder engine (pwBuilder.js) are plain `await pw.click(sel, nav);` calls:
+// all behaviour (retry, fallback, first-match, select2...) lives in the builder. The runner only (a) supplies
+// `pw` itself and (b) hands each selector-bearing call its recorded metadata (steps_json[i]) via pw.useMeta(),
+// in order. Keep BUILDER_META_METHODS in sync with the scripts/import-legacy-tests.js emitter.
+const BUILDER_META_METHODS = ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'clearInput'];
+const BUILDER_CALL_RE = new RegExp(String.raw`^(\s*)await\s+pw\.(` + BUILDER_META_METHODS.join('|') + String.raw`)\(`, 'gm');
+const BUILDER_CTOR_RE = /^[ \t]*const\s+pw\s*=\s*new\s+PlaywrightBuilder\([^\n]*\);?[ \t]*$/gm;
+function usesBuilder(code) {
+    return /\bpw\.\w+\(/.test(code);
+}
+function instrumentBuilderCalls(code, steps) {
+    let stepIndex = 0;
+    return code.replace(BUILDER_CTOR_RE, '').replace(BUILDER_CALL_RE, (full, indent, method) => {
+        const meta = (steps && steps[stepIndex]) || null;
+        stepIndex++;
+        return `${indent}pw.useMeta(${JSON.stringify(meta)});\n${indent}await pw.${method}(`;
     });
 }
 
@@ -233,7 +366,11 @@ function instrumentNavigations(code) {
 function writeCombinedSpec(tests, dir) {
     // Deduplicated (tests are usually generated from the same importer boilerplate, so most
     // preambles are identical -- redeclaring the same function twice is a SyntaxError).
-    const preambles = [...new Set(tests.map((t) => extractPreamble(t.playwright_code)).filter(Boolean))];
+    const preambles = [...new Set(tests.map((t) => extractPreamble(t.playwright_code)).filter(Boolean))].filter((p) => {
+        if (!syntaxError(p)) return true;
+        console.error('[insightest] Skipping a malformed preamble (syntax error): ' + p.slice(0, 120).replace(/\s+/g, ' '));
+        return false;
+    });
     const body = tests
         .map((t) => {
             const title = `${(t.name || `Test ${t.id}`).replace(/`/g, '\\`')} (id ${t.id})`;
@@ -243,15 +380,36 @@ function writeCombinedSpec(tests, dir) {
             } catch {
                 steps = null;
             }
-            let testBody = instrumentNavigations(extractTestBody(t.playwright_code));
-            testBody = instrumentResilientActions(normalizeSelect2Options(testBody), steps);
-            return `  test(\`${title}\`, async () => {\n    const page = __sharedPage;\n${testBody}\n  });`;
+            let testBody;
+            let skipReason = null;
+            let builderTest = false;
+            try {
+                const rawBody = extractTestBody(t.playwright_code);
+                builderTest = usesBuilder(rawBody);
+                if (builderTest) {
+                    testBody = instrumentBuilderCalls(rawBody, steps);
+                } else {
+                    testBody = instrumentNavigations(rawBody);
+                    testBody = instrumentResilientActions(normalizeSelect2Options(testBody), steps, parseSelectorPriority(t.selector_priority));
+                }
+                skipReason = syntaxError(testBody);
+            } catch (e) {
+                skipReason = e.message;
+            }
+            if (skipReason) {
+                // One malformed recording must not stop the suite from loading: it is skipped, the rest run.
+                console.error(`[insightest] Skipping test "${t.name}" (id ${t.id}): invalid recorded code -- ${skipReason}`);
+                testBody = `    test.skip(true, ${JSON.stringify('Invalid recorded code: ' + skipReason)});`;
+            }
+            const pwInit = builderTest ? `    const pw = new PlaywrightBuilder(page, { priority: ${JSON.stringify(parseSelectorPriority(t.selector_priority))} });\n` : '';
+            return `  test(\`${title}\`, async () => {\n    const page = __sharedPage;\n${pwInit}${testBody}\n  });`;
         })
         .join('\n\n');
 
 
     const source = `import { test, expect } from '@playwright/test';
 const fs = require('fs');
+const { PlaywrightBuilder } = require(${JSON.stringify(path.join(__dirname, 'pwBuilder.js'))});
 
 ${preambles.join('\n\n')}
 
@@ -354,6 +512,44 @@ async function __insightestFindBySimilarity(page, textHint, tagHint) {
     .catch(() => null);
 }
 
+// select2 option picked BY TEXT: exact (trim, case-insensitive) > equal ignoring punctuation/spacing
+// ("AE - DUBAI" vs "AE-DUBAI") > contains. If nothing visible matches (e.g. an ajax list that only shows
+// the value once searched), types the text into the open dropdown's search box and looks again. Throws if
+// still absent, so the secondary selectors take over.
+async function __insightestSelect2Option(page, text) {
+  const all = page.locator('.select2-results__option:visible');
+  const norm = (s) => Array.from(String(s).toLowerCase()).filter((ch) => ch !== ch.toUpperCase() || (ch >= '0' && ch <= '9')).join('');
+  const raw = String(text).trim().toLowerCase();
+  const want = norm(text);
+  const find = async () => {
+    const texts = await all.allInnerTexts();
+    let i = texts.findIndex((t) => t.trim().toLowerCase() === raw);
+    if (i < 0) i = texts.findIndex((t) => norm(t) === want);
+    if (i < 0) i = texts.findIndex((t) => norm(t).includes(want));
+    return i;
+  };
+  const poll = async (ms) => {
+    const end = Date.now() + ms;
+    for (;;) {
+      const i = await find();
+      if (i >= 0) return i;
+      if (Date.now() >= end) return -1;
+      await page.waitForTimeout(250);
+    }
+  };
+  let i = await poll(3000);
+  if (i < 0) {
+    const search = page.locator('.select2-container--open .select2-search__field').last();
+    if (await search.isVisible().catch(() => false)) {
+      await search.fill('');
+      await search.pressSequentially(String(text), { delay: 20 });
+      i = await poll(8000);
+    }
+  }
+  if (i < 0) throw new Error('select2 option not found: ' + text);
+  return all.nth(i);
+}
+
 async function __insightestAction(page, primaryBuild, primaryLabel, perform, actionLabel, stepMeta) {
   const betweenActionMs = Number(process.env.INSIGHTEST_BETWEEN_ACTION_MS || 0);
   let lastError;
@@ -364,7 +560,7 @@ async function __insightestAction(page, primaryBuild, primaryLabel, perform, act
     const prefix = attempt === 1 ? '' : \`Retry \${attempt}/3: \`;
     console.log(\`[insightest] \${prefix}\${actionLabel} \${primaryLabel}\`);
     try {
-      await perform(primaryBuild());
+      await perform((await primaryBuild()).first()); // first match, like Puppeteer (no strict-mode failure)
       return;
     } catch (e) {
       lastError = e;
@@ -379,7 +575,7 @@ async function __insightestAction(page, primaryBuild, primaryLabel, perform, act
   for (const sel of secondary) {
     console.log(\`[insightest] Fallback 3/3 (selettore secondario): \${actionLabel} \${sel}\`);
     try {
-      await perform(page.locator(sel));
+      await perform(sel.startsWith('select2text:') ? await __insightestSelect2Option(page, JSON.parse(sel.slice(12))) : page.locator(sel).first());
       return;
     } catch (e) {
       lastError = e;
@@ -390,7 +586,7 @@ async function __insightestAction(page, primaryBuild, primaryLabel, perform, act
     if (best) {
       console.log(\`[insightest] Fallback 3/3 (similarita \${best.score.toFixed(2)}): \${actionLabel} \${best.selector}\`);
       try {
-        await perform(page.locator(best.selector));
+        await perform(page.locator(best.selector).first());
         return;
       } catch (e) {
         lastError = e;
@@ -398,6 +594,15 @@ async function __insightestAction(page, primaryBuild, primaryLabel, perform, act
     }
   }
   console.error(\`[insightest] Azione fallita dopo 3 tentativi: \${actionLabel} \${primaryLabel}\`);
+  // Why did it time out? Dump page state + the tail of Playwright's call log (e.g. "element is
+  // not visible" / "<div> intercepts pointer events") so CI logs are actionable.
+  try {
+    let count = '?';
+    try { count = await (await primaryBuild()).count(); } catch {}
+    console.error(\`[insightest]   diagnostica: url=\${page.url()} titolo="\${await page.title().catch(() => '')}" match=\${count}\`);
+    const tail = String((lastError && lastError.message) || '').split('\\n').slice(1, 8).map((l) => l.trim()).filter(Boolean);
+    for (const l of tail) console.error(\`[insightest]   | \${l}\`);
+  } catch {}
   throw lastError;
 }
 
@@ -581,6 +786,13 @@ async function main() {
         console.log('No tests registered for this organization, nothing to run.');
         return;
     }
+    // The API's JSON types are not reliable: ids can arrive as strings ("54") while depends_on_test_id is a number
+    // (or the reverse). Lookups by id -- prerequisite chains, --runfailed, ordering -- silently miss otherwise.
+    tests = tests.map((t) => ({
+        ...t,
+        id: Number(t.id),
+        depends_on_test_id: t.depends_on_test_id === null || t.depends_on_test_id === undefined || t.depends_on_test_id === '' ? null : Number(t.depends_on_test_id),
+    }));
 
     if (args.runfailed) {
         const byId = new Map(tests.map((t) => [t.id, t]));
@@ -597,16 +809,38 @@ async function main() {
             if (needed.has(id) || !byId.has(id)) return;
             needed.add(id);
             const dep = byId.get(id).depends_on_test_id;
-            if (dep) addWithDeps(dep);
+            console.log(`Adding test id ${id} to needed set`);
+            if (dep) {
+                console.log(`Test id ${id} depends on test id ${dep}`);
+                addWithDeps(dep);
+            }
         };
         failedIds.forEach(addWithDeps);
         tests = tests.filter((t) => needed.has(t.id));
-        console.log(`--runfailed: rerunning ${failedIds.size} failed test(s) plus ${tests.length - failedIds.size} prerequisite test(s).`);
+        const prereqCount = tests.filter((t) => !failedIds.has(t.id)).length;
+        console.log(`--runfailed: rerunning ${failedIds.size} failed test(s) plus ${prereqCount} prerequisite test(s) (run first, even if they passed last time).`);
     }
 
-    console.log(`Running ${tests.length} test(s) locally with Playwright (in order, sharing one browser session):`);
-    tests.forEach((t, i) => console.log(`  ${i + 1}. ${t.name || `Test ${t.id}`}`));
+    // Every prerequisite (depends_on_test_id chain) must run BEFORE the tests that need it, whatever order the
+    // API returned them in: the whole suite shares one browser session, so e.g. the login test has to come first.
+    tests = orderByDependencies(tests);
 
+    console.log(`Running ${tests.length} test(s) locally with Playwright (in order, sharing one browser session):`);
+    const idsPresent = new Set(tests.map((t) => t.id));
+    tests.forEach((t, i) => {
+        const dep = t.depends_on_test_id;
+        const note = dep == null ? '' : idsPresent.has(dep) ? `  (pretest: id ${dep} runs first)` : `  (pretest: id ${dep} -- NOT RETURNED BY THE SERVER)`;
+        console.log(`  ${i + 1}. ${t.name || `Test ${t.id}`}${note}`);
+    });
+    const missingPrereqs = [...new Set(tests.filter((t) => t.depends_on_test_id != null && !idsPresent.has(t.depends_on_test_id)).map((t) => t.depends_on_test_id))];
+    if (missingPrereqs.length) {
+        console.error(
+            `[insightest] WARNING: prerequisite test id(s) ${missingPrereqs.join(', ')} were not returned by the server, so the tests that need them run WITHOUT that setup (e.g. without login). ` +
+                `Cause: the backend is older than the runner (it only returns tests included in CI/CD, not their prerequisites) -- deploy the latest backend, or enable "include in CI/CD" on those tests.`
+        );
+    }
+
+    console.log(`Selector priority: ${[...new Set(tests.map((t) => parseSelectorPriority(t.selector_priority).join(' > ')))].join(' | ')}`);
     writeCombinedSpec(tests, workDir);
 
     // --resilient no longer re-runs the whole suite: it's a single Playwright invocation where
@@ -654,6 +888,15 @@ async function main() {
         // Nothing was published live; every result gets reported below.
     }
     const specs = collectSpecs(report.suites);
+    if (specs.length === 0) {
+        console.error(`[insightest] Playwright ran 0 of ${tests.length} tests -- the generated suite failed to load (see "Playwright error" above).`);
+        anyFailed = true;
+        try {
+            const keep = path.join(path.dirname(junitOutputPath), 'suite.spec.failed.ts');
+            fs.copyFileSync(path.join(workDir, 'suite.spec.ts'), keep);
+            console.error('[insightest] Saved the generated suite for debugging: ' + keep);
+        } catch {}
+    }
     for (const spec of specs) {
         const testId = testIdFromTitle(spec.title);
         if (!testId) continue;

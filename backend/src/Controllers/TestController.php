@@ -221,16 +221,29 @@ final class TestController
     public static function listForCi(Request $req): void
     {
         $orgId = (int) $req->apiKey['org_id'];
+        // A test's prerequisites (depends_on_test_id chain, e.g. a login test) must reach the runner even when
+        // they are themselves excluded from CI/CD, otherwise the tests that need them lose their setup.
         $stmt = Database::pdo()->prepare(
-            'SELECT t.id, t.name, t.playwright_code, t.steps_json, t.depends_on_test_id,
+            'WITH RECURSIVE wanted(id) AS (
+                SELECT t.id FROM tests t JOIN projects p ON p.id = t.project_id
+                WHERE p.org_id = ? AND t.include_in_ci = 1
+                UNION
+                SELECT t.depends_on_test_id FROM tests t JOIN wanted w ON t.id = w.id
+                WHERE t.depends_on_test_id IS NOT NULL
+             )
+             SELECT t.id, t.name, t.playwright_code, t.steps_json, t.depends_on_test_id, p.selector_priority,
                 (SELECT status FROM test_runs r WHERE r.test_id = t.id AND r.triggered_by = \'ci\' ORDER BY r.created_at DESC LIMIT 1) AS last_ci_status
              FROM tests t
              JOIN projects p ON p.id = t.project_id
-             WHERE p.org_id = ? AND t.include_in_ci = 1'
+             WHERE p.org_id = ? AND t.id IN (SELECT id FROM wanted)
+             ORDER BY t.id'
         );
-        $stmt->execute([$orgId]);
+        $stmt->execute([$orgId, $orgId]);
         $tests = $stmt->fetchAll();
         foreach ($tests as &$test) {
+            // PDO/sqlite hands every column back as a string on some PHP versions; the runner matches ids
+            // against depends_on_test_id, so both must be real integers.
+            $test['id'] = (int) $test['id'];
             $test['depends_on_test_id'] = $test['depends_on_test_id'] !== null ? (int) $test['depends_on_test_id'] : null;
         }
         Response::json(['tests' => $tests]);

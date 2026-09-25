@@ -12,7 +12,7 @@ export interface StatusStep {
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ACTION_LOG_RE =
-  /\[insightest\]\s+(?:Retry \d\/\d:\s+)?(Click|Fill|Doppio click|Check|Uncheck|Seleziona opzione|Premi tasto|Hover|Tap|Digita|Carica file|Seleziona testo|Naviga)\b\s*(.*)$/;
+  /\[insightest\]\s+(?:Retry \d\/\d:\s+)?(Click destro|Click|Fill|Svuota|Doppio click|Check|Uncheck|Seleziona opzione|Premi tasto|Hover|Tap|Digita|Carica file|Seleziona testo|Naviga)\b\s*(.*)$/;
 const squash = (s: string): string => s.replace(/\s+/g, '');
 
 /**

@@ -4,6 +4,7 @@ import { useAuth } from '../state/AuthContext';
 import { Brand } from '../components/Brand';
 import { InvitationBell } from '../components/InvitationBell';
 import { MembersModal } from '../components/MembersModal';
+import { DEFAULT_SELECTOR_PRIORITY, parseSelectorPriority, SelectorPriorityEditor, type SelectorKind } from '../components/SelectorPriorityEditor';
 import { t } from '../i18n';
 import type { Organization, Project } from '../types';
 
@@ -50,10 +51,12 @@ export function ProjectsScreen({
   const [newName, setNewName] = useState('');
   const [newBaseUrl, setNewBaseUrl] = useState('');
   const [newRepoPath, setNewRepoPath] = useState('');
+  const [newSelectorPriority, setNewSelectorPriority] = useState<SelectorKind[]>(DEFAULT_SELECTOR_PRIORITY);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
   const [editingBaseUrl, setEditingBaseUrl] = useState('');
   const [editingRepoPath, setEditingRepoPath] = useState('');
+  const [editingSelectorPriority, setEditingSelectorPriority] = useState<SelectorKind[]>(DEFAULT_SELECTOR_PRIORITY);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -81,7 +84,9 @@ export function ProjectsScreen({
         name: newName,
         base_url: newBaseUrl.trim() || null,
         repo_path: newRepoPath.trim() || null,
+        selector_priority: newSelectorPriority,
       });
+      setNewSelectorPriority(DEFAULT_SELECTOR_PRIORITY);
       setNewName('');
       setNewBaseUrl('');
       setNewRepoPath('');
@@ -97,6 +102,7 @@ export function ProjectsScreen({
     setEditingName(project.name);
     setEditingBaseUrl(project.base_url ?? '');
     setEditingRepoPath(project.repo_path ?? '');
+    setEditingSelectorPriority(parseSelectorPriority(project.selector_priority));
   }
 
   async function saveEdit(projectId: number): Promise<void> {
@@ -106,6 +112,7 @@ export function ProjectsScreen({
         name: editingName,
         base_url: editingBaseUrl.trim() || null,
         repo_path: editingRepoPath.trim() || null,
+        selector_priority: editingSelectorPriority,
       });
       setEditingId(null);
       await load();
@@ -163,6 +170,7 @@ export function ProjectsScreen({
                 onChange={setEditingRepoPath}
                 placeholder={t('Local path of the git repo — used to delegate repairs to an AI agent')}
               />
+              <SelectorPriorityEditor value={editingSelectorPriority} onChange={setEditingSelectorPriority} />
               <div className="flex gap-2">
                 <button onClick={() => saveEdit(project.id)}>{t('Save')}</button>
                 <button className="secondary" onClick={() => setEditingId(null)}>
@@ -220,6 +228,7 @@ export function ProjectsScreen({
             onChange={setNewRepoPath}
             placeholder={t('Local path of the git repo (optional) — used to delegate repairs to an AI agent')}
           />
+          <SelectorPriorityEditor value={newSelectorPriority} onChange={setNewSelectorPriority} />
           <button type="submit" disabled={!newName.trim()} className="self-start">
             <Plus size={15} /> {t('Create')}
           </button>

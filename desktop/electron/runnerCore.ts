@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { m } from './messages';
 
 export interface PlaywrightRunResult {
   status: 'passed' | 'failed' | 'error';
@@ -13,6 +14,8 @@ export interface PlaywrightRunOptions {
   headed?: boolean;
   /** Delay (ms) Playwright waits between simulated actions, so a headed run is actually watchable by a person. */
   betweenActionMs?: number;
+  /** Project's selector priority (kinds, in order) used by PlaywrightBuilder tests; default when omitted. */
+  selectorPriority?: string[];
 }
 
 export interface BaselineResult {
@@ -85,10 +88,10 @@ function iaQaHealBin(): string {
   return resolveNodeModule(getPaths().appRoot, path.join('@ia-qa', 'self-healing', 'dist', 'cli', 'index.js'));
 }
 
-const NO_BASELINE_MESSAGE =
-  "Analisi non disponibile: questo motore di self-healing ha bisogno di una \"baseline\" " +
-  '(una mappa del sito testato) che per ora non viene creata automaticamente per i progetti Insightest. ' +
-  "Il log del fallimento resta comunque salvato qui sotto per l'ispezione manuale.";
+const noBaselineMessage = (): string =>
+  m(
+    'Analysis unavailable: this self-healing engine needs a "baseline" (a map of the tested site) that is not yet created automatically for Insightest projects. The failure log is still saved below for manual inspection.'
+  );
 
 /**
  * `spawnSync` blocks the entire Electron main process for as long as the child runs
@@ -178,7 +181,7 @@ export async function explainFailure(log: string): Promise<string | undefined> {
   // doesn't set up per-project yet. Surface a plain-language explanation instead of the
   // raw CLI wording, which reads like a bug report about this app's own install folder.
   if (/not an ia-qa-heal project/i.test(output) || /No \.ia-qa\//i.test(output)) {
-    return NO_BASELINE_MESSAGE;
+    return noBaselineMessage();
   }
   return output;
 }
@@ -289,6 +292,62 @@ const ACTION_LABELS: Record<string, string> = {
   selectText: 'Select text on',
 };
 const ACTION_LINE_RE = new RegExp(`^(\\s*)await\\s+(page\\.[^\\n;]*?)\\.(${ACTION_METHODS.join('|')})\\((.*)\\);\\s*$`, 'gm');
+
+/* ---------- tests written against the PlaywrightBuilder engine (pwBuilder.js) ----------
+ * Their code is plain `await pw.click(selector, nav);` calls; all behaviour (retry, fallback, select2...) lives in
+ * the builder. Same contract as ci-runner/runner.js: the runner supplies `pw` and hands each selector-bearing call
+ * its steps_json entry via pw.useMeta(). Keep BUILDER_META_METHODS in sync with it and with src/stepModel.ts. */
+const BUILDER_META_METHODS = ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'clearInput'];
+const BUILDER_CALL_RE = new RegExp(String.raw`^(\s*)await\s+pw\.(` + BUILDER_META_METHODS.join('|') + String.raw`)\(`, 'gm');
+const BUILDER_CTOR_RE = /^[ \t]*const\s+pw\s*=\s*new\s+PlaywrightBuilder\([^\n]*\);?[ \t]*$/gm;
+
+function usesBuilder(code: string): boolean {
+  return /\bpw\.\w+\(/.test(code);
+}
+
+/** Strips the stored `const pw = ...` line (supplied once by withBuilderRuntime) and prefixes each selector-bearing
+ * call with its recorded metadata, by position. Must run on ONE test's body at a time, before bodies are combined. */
+function instrumentBuilderCalls(body: string, steps: ResilientStepMeta[] | null | undefined): string {
+  let stepIndex = 0;
+  return body.replace(BUILDER_CTOR_RE, '').replace(BUILDER_CALL_RE, (_m, indent: string, method: string) => {
+    const meta = steps && steps[stepIndex] ? steps[stepIndex] : null;
+    stepIndex += 1;
+    return `${indent}pw.useMeta(${JSON.stringify(meta)});\n${indent}await pw.${method}(`;
+  });
+}
+
+/** Everything declared before the test() call, minus `import` lines (e.g. the legacy importer's helper functions). */
+function extractPreamble(code: string): string {
+  const testCall = /\btest\(/.exec(code);
+  if (!testCall) return '';
+  return code
+    .slice(0, testCall.index)
+    .replace(/^\s*import\s[^;]*;\s*/gm, '')
+    .trim();
+}
+
+function replaceTestBody(code: string, newBody: string): string {
+  const marker = /async\s*\([^)]*\)\s*=>\s*\{/.exec(code);
+  if (!marker) return code;
+  const start = marker.index + marker[0].length;
+  return code.slice(0, start) + newBody + code.slice(start + extractTestBody(code).length);
+}
+
+/** Makes builder code runnable: `pw` in scope (one PlaywrightBuilder per test) and the builder module required
+ * from next to this file (dist-electron/pwBuilder.js). No-op for tests in the older page.locator format. */
+function withBuilderRuntime(code: string, priority?: string[]): string {
+  if (!usesBuilder(code)) return code;
+  const builderPath = path.join(path.dirname(getPaths().liveReporterPath), 'pwBuilder.js').replace(/\\/g, '/');
+  const requireLine = `const { PlaywrightBuilder } = require(${JSON.stringify(builderPath)});`;
+  let out = code.replace(BUILDER_CTOR_RE, '');
+  out = out.replace(/^[ \t]*import\s*\{\s*PlaywrightBuilder\s*\}\s*from\s*['"][^'"]*['"];?[ \t]*$/m, requireLine);
+  if (!out.includes(requireLine)) out = `${requireLine}\n${out}`;
+  const marker = /async\s*\([^)]*\)\s*=>\s*\{/.exec(out);
+  if (!marker) return out;
+  const at = marker.index + marker[0].length;
+  const ctor = `\n  const pw = new PlaywrightBuilder(page, { priority: ${JSON.stringify(priority ?? null)} });\n`;
+  return out.slice(0, at) + ctor + out.slice(at);
+}
 
 /** select2 renders its dropdown in a transient overlay under <body> (outside the app root), and
  * codegen records the picked option as a positional xpath into it (`xpath=//html/body//span[1]/
@@ -431,7 +490,7 @@ function withResilientActions(code: string, steps: ResilientStepMeta[] | null | 
     `    const prefix = attempt === 1 ? '' : 'Retry ' + attempt + '/3: ';\n` +
     `    console.log('[insightest] ' + prefix + actionLabel + ' ' + primaryLabel);\n` +
     `    try {\n` +
-    `      await perform(primaryBuild());\n` +
+    `      await perform(primaryBuild().first());\n` +
     `      return;\n` +
     `    } catch (e) {\n` +
     `      lastError = e;\n` +
@@ -446,7 +505,7 @@ function withResilientActions(code: string, steps: ResilientStepMeta[] | null | 
     `  for (const { sel, score } of ranked) {\n` +
     `    console.log('[insightest] Fallback 3/3 (selettore secondario, similarita ' + score.toFixed(2) + '): ' + actionLabel + ' ' + sel);\n` +
     `    try {\n` +
-    `      await perform(page.locator(sel));\n` +
+    `      await perform(page.locator(sel).first());\n` +
     `      return;\n` +
     `    } catch (e) {\n` +
     `      lastError = e;\n` +
@@ -457,7 +516,7 @@ function withResilientActions(code: string, steps: ResilientStepMeta[] | null | 
     `    if (best) {\n` +
     `      console.log('[insightest] Fallback 3/3 (similarita ' + best.score.toFixed(2) + '): ' + actionLabel + ' ' + best.selector);\n` +
     `      try {\n` +
-    `        await perform(page.locator(best.selector));\n` +
+    `        await perform(page.locator(best.selector).first());\n` +
     `        return;\n` +
     `      } catch (e) {\n` +
     `        lastError = e;\n` +
@@ -499,15 +558,18 @@ async function executeSpec(
   const specPath = path.join(workDir, specFileName);
   const reportPath = path.join(workDir, 'report.json');
   const configPath = path.join(workDir, 'playwright.config.js');
-  fs.writeFileSync(specPath, withSmartFill(withResilientActions(source, steps)), 'utf8');
+  fs.writeFileSync(specPath, withSmartFill(withResilientActions(withBuilderRuntime(source, options.selectorPriority), steps)), 'utf8');
   // Playwright's default 30s per-test timeout counts the *whole* test body, including any
   // dependency test spliced in by the caller and every explicit `waitForTimeout()` from the
   // legacy recording -- both easily blow past 30s on their own, so the budget must scale with
   // what's actually in the generated file instead of being fixed.
-  const explicitWaitMs = [...source.matchAll(/waitForTimeout\((\d+)\)/g)].reduce((sum, m) => sum + Number(m[1]), 0);
+  const explicitWaitMs = [...source.matchAll(/(?:waitForTimeout|pw\.wait)\((\d+)\)/g)].reduce((sum, m) => sum + Number(m[1]), 0);
   const actionCount = (source.match(/^\s*await /gm) ?? []).length;
   const slowMoOverheadMs = actionCount * Math.max(0, options.betweenActionMs ?? 0);
-  const timeoutMs = Math.max(30000, Math.round((explicitWaitMs + slowMoOverheadMs) * 1.5) + 30000);
+  // Builder actions retry with escalating timeouts (8s/15s/20s) and settle after navigations, so each one can
+  // legitimately take far longer than a bare Playwright call.
+  const builderActionCount = (source.match(/^\s*await pw\./gm) ?? []).length;
+  const timeoutMs = Math.max(30000, Math.round((explicitWaitMs + slowMoOverheadMs) * 1.5) + 30000 + builderActionCount * 6000);
   const liveReporterPath = getPaths().liveReporterPath;
   const reportPathForConfig = reportPath.replace(/\\/g, '/');
   // A dedicated config (rather than bare CLI flags) is needed for the inter-action delay
@@ -573,20 +635,52 @@ export async function runPlaywrightTest(
   options: PlaywrightRunOptions = {},
   dependencyCodes?: string[],
   onLine?: (line: string) => void,
-  steps?: ResilientStepMeta[] | null
+  steps?: ResilientStepMeta[] | null,
+  /** steps_json of each dependency, same order as `dependencyCodes` (oldest ancestor first). */
+  dependencySteps?: (ResilientStepMeta[] | null)[]
 ): Promise<PlaywrightRunResult> {
+  // Builder-format tests get their per-step metadata attached HERE, one test at a time, because
+  // it is positional (steps_json[i] belongs to the i-th call of that test) and the bodies are
+  // combined below. Legacy-format tests keep going through executeSpec's own instrumentation.
+  const mainIsBuilder = usesBuilder(playwrightCode);
+  const mainCode = mainIsBuilder ? replaceTestBody(playwrightCode, instrumentBuilderCalls(extractTestBody(playwrightCode), steps)) : playwrightCode;
+
   // Each ancestor's own steps run first, in the same test/page (oldest ancestor first), so
   // its session (login cookies, storage) carries over -- without ever storing its steps
   // inside this test. `dependencyCodes` is the whole depends_on_test_id chain, not just the
   // immediate predecessor: a predecessor can itself depend on another test.
-  const dependencyBodies = (dependencyCodes ?? []).map(extractTestBody).join('\n');
+  const dependencyBodies = (dependencyCodes ?? [])
+    .map((c, i) => {
+      const body = extractTestBody(c);
+      return usesBuilder(c) ? instrumentBuilderCalls(body, dependencySteps?.[i]) : body;
+    })
+    .join('\n');
   // Same anchoring as extractTestBody above: must require `async` before the arrow, or this
   // would splice into the first plain arrow callback in the file instead of the test's own.
-  const finalSource = dependencyBodies
-    ? playwrightCode.replace(/(async\s*\([^)]*\)\s*=>\s*\{)/, `$1\n${dependencyBodies}\n`)
-    : playwrightCode;
+  // (A replacer function, not a string: recorded selectors may contain `$` sequences.)
+  let finalSource = dependencyBodies
+    ? mainCode.replace(/(async\s*\([^)]*\)\s*=>\s*\{)/, (marker) => `${marker}\n${dependencyBodies}\n`)
+    : mainCode;
 
-  const { workDir, ...result } = await executeSpec(finalSource, options, {}, onLine, steps);
+  // A dependency's body may call helpers its file declares OUTSIDE the test (older imports: reportNetworkErrors,
+  // resolveLocator). Only the body is spliced in, so without their declarations the very first line throws a
+  // ReferenceError -- before any step runs. Bring each dependency's preamble along (same as ci-runner's extractPreamble).
+  const mainPreamble = extractPreamble(mainCode);
+  const seenPreambles = new Set<string>(mainPreamble ? [mainPreamble] : []);
+  const extraPreambles: string[] = [];
+  for (const dep of dependencyCodes ?? []) {
+    const preamble = extractPreamble(dep);
+    if (preamble && !seenPreambles.has(preamble)) {
+      seenPreambles.add(preamble);
+      extraPreambles.push(preamble);
+    }
+  }
+  if (extraPreambles.length) {
+    const testCall = /\btest\(/.exec(finalSource);
+    if (testCall) finalSource = `${finalSource.slice(0, testCall.index)}${extraPreambles.join('\n\n')}\n\n${finalSource.slice(testCall.index)}`;
+  }
+
+  const { workDir, ...result } = await executeSpec(finalSource, options, {}, onLine, mainIsBuilder ? null : steps);
   fs.rmSync(workDir, { recursive: true, force: true });
   // Only worth classifying an actual failure; a passed/errored-before-running-anything
   // run has no drift-vs-bug question to answer.
@@ -669,10 +763,10 @@ export async function healTest(
 ): Promise<HealResult> {
   const projectDir = ensureIaQaConfig(projectId, baseUrl);
   if (!hasBaseline(projectDir)) {
-    return { status: 'no-baseline', summary: NO_BASELINE_MESSAGE };
+    return { status: 'no-baseline', summary: noBaselineMessage() };
   }
 
-  onLine?.('▶▶ Rieseguo il test per catturare lo stato attuale della pagina');
+  onLine?.(m('▶▶ Re-running the test to capture the current state of the page'));
   await runWithCapture(testCode, projectDir, {}, onLine);
 
   const scratchDir = makeScratchDir('heal-');
@@ -682,10 +776,10 @@ export async function healTest(
   try {
     // Binds this test's own selector literals to the contract just captured -- without it,
     // `diff`/`fix` would see the drift on the page but not know this test refers to it.
-    onLine?.('▶▶ Analizzo i selettori usati dal test (ia-qa-heal ingest)');
+    onLine?.(m('▶▶ Analyzing the selectors used by the test (ia-qa-heal ingest)'));
     await runProcessAsync(iaQaHealBin(), ['ingest', scratchSpec], { cwd: projectDir });
 
-    onLine?.('▶▶ Confronto con la baseline (ia-qa-heal diff)');
+    onLine?.(m('▶▶ Comparing against the baseline (ia-qa-heal diff)'));
     const diffResult = await runProcessAsync(iaQaHealBin(), ['diff', '--json'], { cwd: projectDir });
     let verdict: { verdict: 'PASS' | 'FIX' | 'BLOCK' | null; reason?: string } | undefined;
     try {
@@ -700,14 +794,14 @@ export async function healTest(
         status: 'error',
         summary:
           [diffResult.stdout, diffResult.stderr].filter(Boolean).join('\n') ||
-          'ia-qa-heal diff non ha prodotto un verdetto leggibile.',
+          m('ia-qa-heal diff did not produce a readable verdict.'),
       };
     }
 
     if (verdict?.verdict === 'PASS') {
       return {
         status: 'unchanged',
-        summary: 'I selettori usati da questo test raggiungono ancora i loro elementi: non sembra drift del selettore.',
+        summary: m("The selectors used by this test still reach their elements: this doesn't look like selector drift."),
       };
     }
     if (verdict?.verdict !== 'FIX') {
@@ -715,14 +809,14 @@ export async function healTest(
         status: verdict?.verdict === 'BLOCK' ? 'blocked' : 'error',
         summary:
           verdict?.verdict === 'BLOCK'
-            ? 'Serve una decisione umana: uno o più elementi sono ambigui, spariti, o il selettore ora punta a un elemento diverso. Nessuna riscrittura è stata applicata.'
-            : verdict?.reason ?? 'Verdetto non disponibile.',
+            ? m('A human decision is needed: one or more elements are ambiguous, missing, or the selector now points to a different element. No rewrite was applied.')
+            : verdict?.reason ?? m('Verdict not available.'),
       };
     }
 
     // FIX: rewrite the scratch copy (test paths default to what `ingest` just wrote to
     // usage.json, i.e. only our scratchSpec) and read the repaired source back.
-    onLine?.('▶▶ Applico la riparazione (ia-qa-heal fix)');
+    onLine?.(m('▶▶ Applying the repair (ia-qa-heal fix)'));
     const fixResult = await runProcessAsync(iaQaHealBin(), ['fix'], { cwd: projectDir });
     const proposedCode = fs.readFileSync(scratchSpec, 'utf8');
     if (proposedCode === testCode) {
@@ -730,11 +824,11 @@ export async function healTest(
         status: 'error',
         summary:
           [fixResult.stdout, fixResult.stderr].filter(Boolean).join('\n') ||
-          'ia-qa-heal ha segnalato FIX ma non ha riscritto il file di test.',
+          m('ia-qa-heal reported FIX but did not rewrite the test file.'),
       };
     }
 
-    onLine?.('▶▶ Rieseguo il test riparato per verificare che ora passi');
+    onLine?.(m('▶▶ Re-running the repaired test to check it now passes'));
     const verifyRun = await runPlaywrightTest(proposedCode, {}, undefined, onLine);
     return {
       status: 'healed',

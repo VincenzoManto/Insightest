@@ -39,6 +39,7 @@ const webBridge: InsightestBridge = {
     aiTest: desktopOnly,
     aiCancel: async () => false,
   },
+  i18n: { setLocale: async () => {} },
   dialog: { pickFolder: async () => null },
   mcp: { setup: desktopOnly },
 };

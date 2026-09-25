@@ -6,6 +6,10 @@ import { InvitationsProvider } from './state/InvitationsContext';
 import { App } from './App';
 import { ErrorBoundary } from './ErrorBoundary';
 import './styles.css';
+import { locale } from './i18n';
+
+// Keep main-process messages (heal progress, MCP errors) in the renderer's language.
+void window.insightest.i18n.setLocale(locale);
 
 // A rejected promise with no .catch() (e.g. a fire-and-forget `load()` in a useEffect)
 // otherwise fails silently in the console with no visible effect on the UI; logging it

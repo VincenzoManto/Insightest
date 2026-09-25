@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
 import { resolveNodeModule } from './runnerCore';
+import { setMessagesLocale } from './messages';
 import {
   runPlaywrightTest,
   recordPlaywrightTest,
@@ -43,7 +44,7 @@ function createWindow(): void {
     minWidth: 960,
     minHeight: 640,
     backgroundColor: '#f6f7f5',
-    autoHideMenuBar: true,
+ /*    autoHideMenuBar: true, */
     title: 'Insightest',
     icon: path.join(__dirname, 'icon.png'),
     height: 800,
@@ -90,8 +91,8 @@ ipcMain.handle('auth:clear', () => {
   if (fs.existsSync(authFilePath)) fs.unlinkSync(authFilePath);
 });
 
-ipcMain.handle('playwright:run', async (event, playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null) => {
-  return runPlaywrightTest(playwrightCode, options, dependencyCodes, (line) => event.sender.send('playwright:progress', line), steps);
+ipcMain.handle('playwright:run', async (event, playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[] }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => {
+  return runPlaywrightTest(playwrightCode, options, dependencyCodes, (line) => event.sender.send('playwright:progress', line), steps, dependencySteps);
 });
 
 ipcMain.handle('playwright:record', async (_event, startUrl: string) => {
@@ -171,6 +172,10 @@ ipcMain.handle('browser:install', (event) => {
     child.on('error', (err) => resolve({ ok: false, output: err.message }));
     child.on('close', (code) => resolve({ ok: code === 0, output }));
   });
+});
+
+ipcMain.handle('i18n:set-locale', (_event, locale: string) => {
+  setMessagesLocale(locale);
 });
 
 ipcMain.handle('dialog:pick-folder', async () => {

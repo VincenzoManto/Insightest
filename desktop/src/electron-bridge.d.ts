@@ -66,7 +66,7 @@ export interface InsightestBridge {
     clear: () => Promise<void>;
   };
   playwright: {
-    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null) => Promise<RunResult>;
+    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[] }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => Promise<RunResult>;
     record: (startUrl: string) => Promise<string | null>;
     augment: (playwrightCode: string) => Promise<ResilientStepMeta[]>;
     heal: (log: string) => Promise<string | null>;
@@ -83,6 +83,9 @@ export interface InsightestBridge {
     aiStatus: () => Promise<AiTestStatus>;
     aiTest: (req: AiTestRequest) => Promise<AiTestResult>;
     aiCancel: () => Promise<boolean>;
+  };
+  i18n: {
+    setLocale: (locale: string) => Promise<void>;
   };
   dialog: {
     pickFolder: () => Promise<string | null>;

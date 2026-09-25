@@ -246,6 +246,7 @@ function FolderTreeItem({
           </button>
         </div>
       </div>
+      <div className="overflow-y-auto max-h-[70dvh]">
       {isOpen &&
         children.map((child) => (
           <FolderTreeItem
@@ -262,6 +263,7 @@ function FolderTreeItem({
             onDelete={onDelete}
           />
         ))}
+        </div>
     </div>
   );
 }

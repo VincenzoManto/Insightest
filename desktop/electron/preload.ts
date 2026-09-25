@@ -69,8 +69,8 @@ contextBridge.exposeInMainWorld('insightest', {
     clear: (): Promise<void> => ipcRenderer.invoke('auth:clear'),
   },
   playwright: {
-    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null): Promise<RunResult> =>
-      ipcRenderer.invoke('playwright:run', playwrightCode, options, dependencyCodes, steps),
+    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[] }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]): Promise<RunResult> =>
+      ipcRenderer.invoke('playwright:run', playwrightCode, options, dependencyCodes, steps, dependencySteps),
     record: (startUrl: string): Promise<string | null> =>
       ipcRenderer.invoke('playwright:record', startUrl),
     augment: (playwrightCode: string): Promise<ResilientStepMeta[]> =>
@@ -101,6 +101,9 @@ contextBridge.exposeInMainWorld('insightest', {
     aiStatus: (): Promise<AiTestStatus> => ipcRenderer.invoke('agent:ai-status'),
     aiTest: (req: AiTestRequest): Promise<AiTestResult> => ipcRenderer.invoke('agent:ai-test', req),
     aiCancel: (): Promise<boolean> => ipcRenderer.invoke('agent:ai-cancel'),
+  },
+  i18n: {
+    setLocale: (locale: string): Promise<void> => ipcRenderer.invoke('i18n:set-locale', locale),
   },
   dialog: {
     pickFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:pick-folder'),

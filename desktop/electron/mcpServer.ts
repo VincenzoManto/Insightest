@@ -7,6 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import type { ZodRawShape } from 'zod';
 import { initRunnerPaths, runPlaywrightTest, healTest, baselineExists } from './runnerCore';
+import { m } from './messages';
 
 /**
  * Standalone MCP server, launched by an MCP-compatible client (Claude Code, etc.) via a plain
@@ -41,7 +42,7 @@ function loadConfig(): McpConfig {
   const configPath = process.env.INSIGHTEST_MCP_CONFIG || path.join(defaultUserDataDir(), 'mcp-config.json');
   if (!fs.existsSync(configPath)) {
     throw new Error(
-      `Config MCP non trovata in ${configPath}. Generala dalla schermata "Agenti AI (MCP)" dell'app desktop Insightest.`
+      m('MCP config not found in {path}. Generate it from the "AI agents (MCP)" screen of the Insightest desktop app.', { path: configPath })
     );
   }
   const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -92,6 +93,7 @@ interface TestRecord {
   project_id: number;
   name: string;
   playwright_code: string;
+  steps_json?: string | null;
   depends_on_test_id: number | null;
 }
 
@@ -104,17 +106,28 @@ interface ProjectRecord {
 }
 
 /** Walks the depends_on_test_id chain (oldest ancestor first), same as the desktop UI's local-run path. */
-async function resolveDependencyCodes(api: Api, test: TestRecord): Promise<string[]> {
+function parseSteps(json: string | null | undefined): any[] | null {
+  try {
+    const v = json ? JSON.parse(json) : null;
+    return Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveDependencyCodes(api: Api, test: TestRecord): Promise<{ codes: string[]; steps: (any[] | null)[] }> {
   const codes: string[] = [];
+  const steps: (any[] | null)[] = [];
   const visited = new Set<number>([test.id]);
   let nextId = test.depends_on_test_id;
   while (nextId !== null && !visited.has(nextId)) {
     visited.add(nextId);
     const ancestor = await api.get<TestRecord>(`/tests/${nextId}`);
     codes.unshift(ancestor.playwright_code);
+    steps.unshift(parseSteps(ancestor.steps_json));
     nextId = ancestor.depends_on_test_id ?? null;
   }
-  return codes;
+  return { codes, steps };
 }
 
 async function main(): Promise<void> {
@@ -168,7 +181,7 @@ async function main(): Promise<void> {
 
   const testIdShape: ZodRawShape = { test_id: z.number() };
 
-  registerTool('get_test', 'Dettagli di un test (incluso il codice Playwright)', testIdShape, async (args: { test_id: number }) => {
+  registerTool('get_test', m('Test details (including the Playwright code)'), testIdShape, async (args: { test_id: number }) => {
     const data = await api.get(`/tests/${args.test_id}`);
     return { content: [{ type: 'text', text: JSON.stringify(data) }] };
   });
@@ -185,17 +198,28 @@ async function main(): Promise<void> {
   };
   registerTool(
     'run_test',
-    'Esegue localmente un test Playwright (con la sua catena di dipendenze) e salva il risultato',
+    m('Runs a Playwright test locally (with its dependency chain) and stores the result'),
     runTestShape,
     async (args: { test_id: number; headed?: boolean; betweenActionMs?: number }) => {
       const testId = args.test_id;
       const test = await api.get<TestRecord>(`/tests/${testId}`);
-      const dependencyCodes = await resolveDependencyCodes(api, test);
+      const dependencies = await resolveDependencyCodes(api, test);
+      const project = await api.get<ProjectRecord & { selector_priority?: string | null }>(`/projects/${test.project_id}`).catch(() => null);
+      let selectorPriority: string[] | undefined;
+      try {
+        const parsed = project?.selector_priority ? JSON.parse(project.selector_priority) : null;
+        if (Array.isArray(parsed) && parsed.length) selectorPriority = parsed.filter((k) => typeof k === 'string');
+      } catch {
+        /* default priority */
+      }
       const startedAt = new Date().toISOString();
       const result = await runPlaywrightTest(
         test.playwright_code,
-        { headed: args.headed, betweenActionMs: args.betweenActionMs },
-        dependencyCodes
+        { headed: args.headed, betweenActionMs: args.betweenActionMs, selectorPriority },
+        dependencies.codes,
+        undefined,
+        parseSteps(test.steps_json),
+        dependencies.steps
       );
       await api.post(`/tests/${testId}/runs`, {
         status: result.status,
@@ -211,7 +235,7 @@ async function main(): Promise<void> {
 
   registerTool(
     'trigger_repair',
-    'Tenta la riparazione self-healing (ia-qa-heal) di un test fallito contro la baseline del progetto',
+    m('Attempts self-healing repair (ia-qa-heal) of a failed test against the project baseline'),
     testIdShape,
     async (args: { test_id: number }) => {
       const testId = args.test_id;
@@ -219,11 +243,11 @@ async function main(): Promise<void> {
       const project = await api.get<ProjectRecord>(`/projects/${test.project_id}`);
       if (!project.base_url) {
         return {
-          content: [{ type: 'text', text: 'Il progetto non ha un base_url configurato: il self-healing è disabilitato.' }],
+          content: [{ type: 'text', text: m('The project has no base_url configured: self-healing is disabled.') }],
         };
       }
       if (!baselineExists(project.id)) {
-        return { content: [{ type: 'text', text: 'Nessuna baseline per questo progetto: crearla prima dalla app desktop.' }] };
+        return { content: [{ type: 'text', text: m('No baseline for this project: create it first from the desktop app.') }] };
       }
       const result = await healTest(project.id, project.base_url, test.playwright_code);
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
@@ -233,7 +257,7 @@ async function main(): Promise<void> {
   const applyRepairShape: ZodRawShape = { test_id: z.number(), proposed_code: z.string() };
   registerTool(
     'apply_repair',
-    'Applica il codice riparato al test memorizzato (sostituisce playwright_code)',
+    m('Applies the repaired code to the stored test (replaces playwright_code)'),
     applyRepairShape,
     async (args: { test_id: number; proposed_code: string }) => {
       await api.put(`/tests/${args.test_id}`, { playwright_code: args.proposed_code });
