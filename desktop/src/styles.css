@@ -197,6 +197,8 @@
   /* ---------- code / logs ---------- */
   .codeblock {
     @apply max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-gridline bg-page p-3 font-mono text-xs leading-relaxed text-ink-secondary;
+        background: #000;
+    color: #fff;
   }
 
   /* ---------- table ---------- */

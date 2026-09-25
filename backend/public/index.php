@@ -93,6 +93,7 @@ $router->delete('/projects/{projectId}', [ProjectController::class, 'delete'], [
 $router->get('/projects/{projectId}/tests', [TestController::class, 'index'], [$auth]);
 $router->post('/projects/{projectId}/tests', [TestController::class, 'create'], [$auth]);
 $router->get('/projects/{projectId}/stats', [TestController::class, 'projectStats'], [$auth]);
+$router->get('/projects/{projectId}/ci-runs', [RunController::class, 'ciRuns'], [$auth]);
 $router->get('/projects/{projectId}/folders', [FolderController::class, 'index'], [$auth]);
 $router->post('/projects/{projectId}/folders', [FolderController::class, 'create'], [$auth]);
 $router->put('/folders/{folderId}', [FolderController::class, 'update'], [$auth]);

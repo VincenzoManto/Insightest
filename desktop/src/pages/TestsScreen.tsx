@@ -268,7 +268,7 @@ function FolderTreeItem({
   );
 }
 
-export function TestsScreen({ project }: { project: Project }): React.ReactElement {
+export function TestsScreen({ project, initialTestId = null }: { project: Project; initialTestId?: number | null }): React.ReactElement {
   const { api } = useAuth();
   const [tests, setTests] = useState<TestSummary[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -278,7 +278,8 @@ export function TestsScreen({ project }: { project: Project }): React.ReactEleme
   const [newFolderParentId, setNewFolderParentId] = useState<number | null>(null);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [stats, setStats] = useState<ProjectStats | null>(null);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  // initialTestId: opened straight on a test's detail (e.g. from the CI runs recap).
+  const [selectedId, setSelectedId] = useState<number | null>(initialTestId);
   const [creating, setCreating] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [triggerFilter, setTriggerFilter] = useState<TriggerFilter>('all');

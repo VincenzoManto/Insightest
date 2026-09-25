@@ -84,6 +84,21 @@ export interface TestRunDetail extends TestRun {
   log: string | null;
 }
 
+/** One CI-triggered test run, as listed by GET /projects/:id/ci-runs (no log: fetch it on demand). */
+export interface CiRunRow {
+  id: number;
+  test_id: number;
+  test_name: string;
+  folder_id: number | null;
+  status: 'passed' | 'failed' | 'error' | 'running';
+  duration_ms: number | null;
+  /** Hash of the pipeline execution that reported it; null on runs recorded before grouping existed. */
+  run_key: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
 export interface Folder {
   id: number;
   project_id: number;

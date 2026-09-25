@@ -3,6 +3,8 @@ import { ArrowLeft, Play, Pencil, Wrench, Globe, MousePointerClick, Type, CheckS
 import { useAuth } from '../state/AuthContext';
 import { computeStepStatuses, type StatusStep, type StepStatus } from '../stepStatus';
 import { StepEditorDrawer } from '../components/StepEditorDrawer';
+import { RunProgressRing } from '../components/RunProgressRing';
+import { countLoggedActions, countStartedActions, runningPercent } from '../runProgress';
 import { parseSelectorPriority } from '../components/SelectorPriorityEditor';
 import { ACTION_LABEL, META_METHODS, hasSelector, newStep, parseBuilderTest, serializeBuilderTest, stepDetail, stepPrimaryLabel, type EditableStep, type ParsedBuilderTest, type StepAction } from '../stepModel';
 import type { Folder, Project, TestDetail, TestRun, TestRunDetail, TestSummary } from '../types';
@@ -314,6 +316,9 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
   const [repairingRunId, setRepairingRunId] = useState<number | null>(null);
   const [repairResult, setRepairResult] = useState<HealResult | null>(null);
   const [liveLines, setLiveLines] = useState<string[]>([]);
+  // Local run progress ring: total = actions of this test + its prerequisites; outcome once the run has ended.
+  const [runTotal, setRunTotal] = useState(0);
+  const [runOutcome, setRunOutcome] = useState<'passed' | 'failed' | null>(null);
   const liveLogRef = useRef<HTMLDivElement>(null);
   const [installedAgents, setInstalledAgents] = useState<Record<AgentName, boolean>>({ claude: false, copilot: false });
   const [agentToConfirm, setAgentToConfirm] = useState<{ agent: AgentName; runId: number } | null>(null);
@@ -428,6 +433,8 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
     setError(null);
     setLastLog(null);
     setLiveLines([]);
+    setRunTotal(countLoggedActions(test.playwright_code));
+    setRunOutcome(null);
     const unsubscribe = window.insightest.playwright.onProgress((line) => setLiveLines((prev) => [...prev, line]));
     const startedAt = new Date().toISOString();
     try {
@@ -446,8 +453,11 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
         dependencySteps.unshift(parseStepsJson(ancestor.steps_json) ?? null);
         nextDependsOn = ancestor.depends_on_test_id ?? null;
       }
+      // Prerequisites run first, in the same browser: their actions count toward the ring too.
+      setRunTotal(countLoggedActions(test.playwright_code) + dependencyCodes.reduce((sum, c) => sum + countLoggedActions(c), 0));
       const result = await window.insightest.playwright.run(test.playwright_code, { headed, betweenActionMs, selectorPriority }, dependencyCodes, parseStepsJson(test.steps_json), dependencySteps);
       setLastLog(result.log);
+      setRunOutcome(result.status === 'passed' ? 'passed' : 'failed');
       await api.post(`/tests/${testId}/runs`, {
         status: result.status,
         duration_ms: result.durationMs,
@@ -458,6 +468,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
       });
       await load();
     } catch (err) {
+      setRunOutcome('failed');
       setError(err instanceof Error ? err.message : t('Unknown error'));
     } finally {
       unsubscribe();
@@ -730,6 +741,12 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
     }
   }
 
+  // Progress ring of the local run (only for local runs, where the total number of actions is known).
+  const startedActions = countStartedActions(liveLines);
+  const runPercent = runOutcome === 'passed' ? 100 : runningPercent(startedActions, runTotal);
+  const showRunRing = runTotal > 0 && (running || runOutcome !== null);
+  const showRunPanel = running || repairingRunId !== null || liveLines.length > 0 || !!lastLog;
+
   if (editing) {
     return (
       <div className="animate-fade-up mx-auto max-w-[860px]">
@@ -967,27 +984,37 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
           )}
           {!stepsDraft && legacySteps.length > 0 && <div className="mt-3 text-xs text-ink-muted">{t('This test uses the older recording format: re-import it (--update) to edit its steps here.')}</div>}
 
-          {(running || repairingRunId !== null || liveLines.length > 0) && (
-            <div className="mt-4">
-              <div className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
-                {(running || repairingRunId !== null) && <CircleDot size={13} className="text-accent2" />}
-                {running || repairingRunId !== null ? t('Steps in progress') : t('Steps of the last run')}
-              </div>
-              <div ref={liveLogRef} className="codeblock max-h-64">
-                {liveLines.length > 0 ? liveLines.join('\n') : t('Waiting for the first step…')}
-              </div>
-            </div>
-          )}
-
-          {lastLog && (
-            <div className="mt-4">
-              <div className="mb-1.5 text-sm font-semibold text-ink-primary">{t('Last local run log')}</div>
-              <pre className="codeblock m-0 max-h-64">{lastLog}</pre>
-            </div>
-          )}
         </div>
 
         <div className="min-w-0">
+          {showRunPanel && (
+            <div className="card">
+              <div className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
+                {(running || repairingRunId !== null) && <CircleDot size={13} className="text-accent2" />}
+                {running || repairingRunId !== null ? t('Steps in progress') : liveLines.length > 0 ? t('Steps of the last run') : t('Last local run log')}
+              </div>
+
+              {showRunRing && (
+                <div className="mb-3 flex justify-center">
+                  <RunProgressRing percent={runPercent} done={runOutcome === 'passed' ? runTotal : startedActions} total={runTotal} failed={runOutcome === 'failed'} />
+                </div>
+              )}
+
+              {(running || repairingRunId !== null || liveLines.length > 0) && (
+                <div ref={liveLogRef} className="codeblock max-h-64">
+                  {liveLines.length > 0 ? liveLines.join('\n') : t('Waiting for the first step…')}
+                </div>
+              )}
+
+              {lastLog && !running && (
+                <div className={liveLines.length > 0 ? 'mt-4' : ''}>
+                  {liveLines.length > 0 && <div className="mb-1.5 text-sm font-semibold text-ink-primary">{t('Last local run log')}</div>}
+                  <pre className="codeblock m-0 max-h-64">{lastLog}</pre>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="card">
             <div className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
               <StickyNote size={15} /> {t('Test notes')}

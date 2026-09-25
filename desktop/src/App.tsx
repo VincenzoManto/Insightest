@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { LayoutDashboard, FolderKanban, Building2, LogOut, ChevronsUpDown, Bell } from 'lucide-react';
+import { LayoutDashboard, FolderKanban, Building2, LogOut, ChevronsUpDown, Bell, History } from 'lucide-react';
 import { useAuth } from './state/AuthContext';
 import { useInvitations } from './state/InvitationsContext';
 import { InvitationsScreen } from './pages/InvitationsScreen';
@@ -8,6 +8,7 @@ import { OrgsScreen } from './pages/OrgsScreen';
 import { ApiKeysScreen } from './pages/ApiKeysScreen';
 import { ProjectsScreen } from './pages/ProjectsScreen';
 import { TestsScreen } from './pages/TestsScreen';
+import { CiRunsScreen } from './pages/CiRunsScreen';
 import { Brand } from './components/Brand';
 import { t } from './i18n';
 import { LanguageSwitcher } from './components/LanguageSwitcher';
@@ -39,6 +40,9 @@ export function App(): React.ReactElement {
   const [managingApiKeysFor, setManagingApiKeysFor] = useState<Organization | null>(null);
   // Set when the open project was reached through a direct project invite (no access to its org's project list).
   const [sharedOnly, setSharedOnly] = useState(false);
+  // Which page of the open project is shown, and (when coming from the CI runs recap) the test to open on arrival.
+  const [view, setView] = useState<'tests' | 'ci-runs'>('tests');
+  const [openTestId, setOpenTestId] = useState<number | null>(null);
   const { invitations, open: invitationsOpen, openInvitations, closeInvitations } = useInvitations();
 
   if (!ready) return <div className="content text-ink-muted">{t('Loading…')}</div>;
@@ -67,6 +71,8 @@ export function App(): React.ReactElement {
   /** Leaves the open project: back to the org's project list, or to the org list for a directly-shared project. */
   const leaveProject = (): void => {
     setProject(null);
+    setView('tests');
+    setOpenTestId(null);
     if (sharedOnly) {
       setOrg(null);
       setSharedOnly(false);
@@ -97,7 +103,16 @@ export function App(): React.ReactElement {
         </button>
 
         <nav className="flex flex-col gap-0.5">
-          <NavItem icon={<LayoutDashboard size={16} />} label={t('Dashboard')} active />
+          <NavItem
+            icon={<LayoutDashboard size={16} />}
+            label={t('Dashboard')}
+            active={view === 'tests'}
+            onClick={() => {
+              setOpenTestId(null);
+              setView('tests');
+            }}
+          />
+          <NavItem icon={<History size={16} />} label={t('CI runs')} active={view === 'ci-runs'} onClick={() => setView('ci-runs')} />
           <NavItem icon={<FolderKanban size={16} />} label={t('Projects')} onClick={leaveProject} />
           <NavItem
             icon={<Building2 size={16} />}
@@ -147,7 +162,18 @@ export function App(): React.ReactElement {
       <main className="flex min-w-0 flex-1 flex-col">
         <div className="content">
           <div className="page">
-            <TestsScreen project={project} />
+            {view === 'ci-runs' ? (
+              <CiRunsScreen
+                project={project}
+                onOpenTest={(id) => {
+                  setOpenTestId(id);
+                  setView('tests');
+                }}
+              />
+            ) : (
+              // Keyed by the requested test so a new request remounts the screen already on that test.
+              <TestsScreen key={openTestId ?? 'list'} project={project} initialTestId={openTestId} />
+            )}
           </div>
         </div>
       </main>

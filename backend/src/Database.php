@@ -40,6 +40,8 @@ final class Database
             self::ensureColumn($pdo, 'projects', 'base_url', 'TEXT');
             self::ensureColumn($pdo, 'projects', 'repo_path', 'TEXT');
             self::ensureColumn($pdo, 'projects', 'selector_priority', 'TEXT');
+            self::ensureColumn($pdo, 'test_runs', 'run_key', 'TEXT');
+            $pdo->exec('CREATE INDEX IF NOT EXISTS idx_test_runs_run_key ON test_runs(run_key)');
 
             self::$instance = $pdo;
         }

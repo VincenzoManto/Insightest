@@ -27,12 +27,14 @@ foreach ([
     ['projects', 'base_url', 'TEXT'],
     ['projects', 'repo_path', 'TEXT'],
     ['projects', 'selector_priority', 'TEXT'],
+    ['test_runs', 'run_key', 'TEXT'],
 ] as [$table, $column, $definition]) {
     $existing = array_column($pdo->query('PRAGMA table_info(' . $table . ')')->fetchAll(), 'name');
     if (!in_array($column, $existing, true)) {
         $pdo->exec("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
     }
 }
+$pdo->exec('CREATE INDEX IF NOT EXISTS idx_test_runs_run_key ON test_runs(run_key)');
 
 @chmod($dbPath, 0600);
 

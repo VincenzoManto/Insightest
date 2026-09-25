@@ -35,6 +35,37 @@ final class RunController
         Response::json(['runs' => $stmt->fetchAll()]);
     }
 
+    /**
+     * Every CI-triggered run of a project, newest first, WITHOUT logs (they can be huge: fetch one on demand from
+     * GET /tests/{id}/runs/{runId}). The desktop groups these rows by run_key into "pipeline runs".
+     */
+    public static function ciRuns(Request $req): void
+    {
+        $projectId = (int) $req->params['projectId'];
+        Authz::requireProjectRole($projectId, $req->user['id']);
+
+        $stmt = Database::pdo()->prepare(
+            "SELECT r.id, r.test_id, t.name AS test_name, t.folder_id, r.status, r.duration_ms, r.run_key,
+                    r.started_at, r.finished_at, r.created_at
+             FROM test_runs r
+             JOIN tests t ON t.id = r.test_id
+             WHERE t.project_id = ? AND r.triggered_by = 'ci'
+             ORDER BY r.created_at DESC, r.id DESC
+             LIMIT 5000"
+        );
+        $stmt->execute([$projectId]);
+        $rows = $stmt->fetchAll();
+        // Some PHP/SQLite builds return every column as a string; the client matches ids, so make them real ints.
+        foreach ($rows as &$row) {
+            $row['id'] = (int) $row['id'];
+            $row['test_id'] = (int) $row['test_id'];
+            $row['folder_id'] = $row['folder_id'] !== null ? (int) $row['folder_id'] : null;
+            $row['duration_ms'] = $row['duration_ms'] !== null ? (int) $row['duration_ms'] : null;
+        }
+        unset($row);
+        Response::json(['runs' => $rows]);
+    }
+
     /** Called by either the desktop app (JWT) or the CI runner (API key) after a Playwright execution. */
     public static function create(Request $req): void
     {
@@ -58,10 +89,14 @@ final class RunController
             $log = substr($log, 0, self::MAX_LOG_LENGTH) . "\n...[truncated]";
         }
 
+        // Groups the runs of one CI pipeline execution (sent by the runner); anything odd is simply ignored.
+        $runKey = isset($req->body['run_key']) ? trim((string) $req->body['run_key']) : '';
+        $runKey = preg_match('/^[A-Za-z0-9._-]{1,64}$/', $runKey) === 1 ? $runKey : null;
+
         $pdo = Database::pdo();
         $pdo->prepare(
-            'INSERT INTO test_runs (test_id, status, duration_ms, log, screenshot_path, trace_path, triggered_by, healed, healing_detail, started_at, finished_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO test_runs (test_id, status, duration_ms, log, screenshot_path, trace_path, triggered_by, healed, healing_detail, started_at, finished_at, run_key)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )->execute([
             $testId,
             $req->body['status'],
@@ -74,6 +109,7 @@ final class RunController
             isset($req->body['healing_detail']) ? (string) $req->body['healing_detail'] : null,
             $req->body['started_at'] ?? null,
             $req->body['finished_at'] ?? null,
+            $runKey,
         ]);
 
         $newRunId = (int) $pdo->lastInsertId();

@@ -92,7 +92,7 @@ class LiveReporter {
         const stderr = (result.stderr || []).map((c) => c.toString()).join('');
         const log = [(result.stdout || []).map((c) => c.toString()).join(''), stderr, result.error?.message].filter(Boolean).join('\n');
         this.pending.push(
-            postRun(baseUrl, apiKey, testId, { status, duration_ms: result.duration ?? 0, log: log || null })
+            postRun(baseUrl, apiKey, testId, { status, duration_ms: result.duration ?? 0, log: log || null, run_key: process.env.INSIGHTEST_RUN_KEY || undefined })
                 .then(() => {
                     // Lets runner.js skip re-posting tests already published live.
                     if (process.env.INSIGHTEST_REPORTED_FILE) fs.appendFileSync(process.env.INSIGHTEST_REPORTED_FILE, `${testId}\n`);

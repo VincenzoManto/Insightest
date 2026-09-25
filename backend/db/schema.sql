@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS test_runs (
     healing_detail TEXT,
     started_at TEXT,
     finished_at TEXT,
+    -- Identifies one CI pipeline execution: every test run reported by the same runner invocation shares it
+    -- (NULL on runs recorded before this existed and on desktop runs). Its index is created in Database.php/migrate.php,
+    -- after the column is guaranteed to exist on databases created by an older schema.
+    run_key TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 

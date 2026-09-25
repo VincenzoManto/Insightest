@@ -418,6 +418,28 @@ const it: Record<string, string> = {
   URL: 'URL',
   Milliseconds: 'Millisecondi',
   Height: 'Altezza',
+
+  // local run progress
+  '{done} of {total} actions': '{done} di {total} azioni',
+
+  // CI runs recap
+  'CI runs': 'Run CI',
+  'One card per pipeline execution, with the result of every test in it.': 'Una scheda per ogni esecuzione della pipeline, con il risultato di ogni test.',
+  Refresh: 'Aggiorna',
+  'Search a test by name, in any folder…': 'Cerca un test per nome, in qualsiasi cartella…',
+  '{results} results in {runs} runs': '{results} risultati in {runs} run',
+  '{runs} runs, {results} results': '{runs} run, {results} risultati',
+  '{n} tests': '{n} test',
+  'no id': 'senza id',
+  'Recorded before runs had an id: grouped by time': 'Registrata prima che le run avessero un id: raggruppata per orario',
+  'Run id (click to copy)': 'Id della run (clicca per copiare)',
+  'Open test': 'Apri test',
+  'Show log': 'Mostra log',
+  'Hide log': 'Nascondi log',
+  '(empty log)': '(log vuoto)',
+  'No CI runs recorded yet. They appear here after the pipeline reports its results.':
+    'Nessuna run CI registrata. Compariranno qui dopo che la pipeline avrà riportato i risultati.',
+  'No test matches the search.': 'Nessun test corrisponde alla ricerca.',
 };
 
 export default it;

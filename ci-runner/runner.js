@@ -18,7 +18,17 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+
+/** Identifier of THIS runner invocation: every result it reports carries it, so the app can group the results of one
+ * pipeline execution together. --runid (e.g. the Azure build id) wins; otherwise "<yyyymmddHHMM>-<random>". */
+function makeRunKey(preferred) {
+    const cleaned = String(preferred || '').trim().replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64);
+    if (cleaned) return cleaned;
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+    return `${stamp}-${crypto.randomBytes(3).toString('hex')}`;
+}
 
 // Matches wherever this file itself is hosted (backend/public/ci-runner/runner.js); self-hosted
 // deployments can override per-invocation with --url, but SaaS users never need to set it.
@@ -62,6 +72,9 @@ function parseArgs(argv) {
                 break;
             case '--runfailed':
                 args.runfailed = true;
+                break;
+            case '--runid':
+                args.runid = argv[++i];
                 break;
             default:
                 console.error(`Unknown argument: ${arg}`);
@@ -749,6 +762,7 @@ function runPlaywright(dir, jsonReportPath, junitOutputPath, opts) {
             ...(opts.resilient ? { INSIGHTEST_RESILIENT: '1' } : {}),
             ...(opts.navTimeout ? { INSIGHTEST_NAV_TIMEOUT_MS: String(opts.navTimeout) } : {}),
             // liveReporter.js publishes each test's result as soon as it ends, using these.
+            INSIGHTEST_RUN_KEY: opts.runKey || '',
             INSIGHTEST_REPORT_URL: opts.apiUrl,
             INSIGHTEST_REPORT_KEY: opts.apiKey,
             INSIGHTEST_REPORTED_FILE: opts.reportedFile,
@@ -772,6 +786,8 @@ async function main() {
     const args = parseArgs(process.argv.slice(2));
     const apiUrl = args.url || process.env.INSIGHTEST_API_URL || DEFAULT_API_URL;
     const apiKey = requireValue(args.key || process.env.INSIGHTEST_API_KEY, 'INSIGHTEST_API_KEY (env) or --key');
+    const runKey = makeRunKey(args.runid || process.env.INSIGHTEST_RUN_ID);
+    console.log(`[insightest] Run id: ${runKey}`);
 
     // Lives under __dirname (not os.tmpdir()) so Node's module resolution, walking up from the
     // generated spec file, finds the @playwright/test that `npm install` put in __dirname/node_modules.
@@ -848,6 +864,7 @@ async function main() {
     // escalating action timeout injected via writeCombinedSpec()'s beforeEach hook.
     const reportedFile = path.join(workDir, 'reported-ids.txt');
     const playwrightResult = runPlaywright(workDir, jsonReportPath, junitOutputPath, {
+        runKey,
         apiUrl,
         apiKey,
         reportedFile,
@@ -920,6 +937,7 @@ async function main() {
                 status,
                 duration_ms: durationMs,
                 log: log || null,
+                run_key: runKey,
             });
         } catch (e) {
             console.error(`Failed to report result for test ${testId}:`, e.message);
