@@ -56,7 +56,7 @@ class LiveReporter {
     onStdOut(chunk, test, result) {
         const text = chunk.toString();
         for (const line of text.split(/\r?\n/)) {
-            if (!line.includes('[insightest]')) continue;
+            if (!line.includes('[insightest]') && !line.includes('[insightest-heal]')) continue;
             console.log(`      ${DIM}${line.trim()}${RESET}`);
         }
     }
@@ -64,7 +64,7 @@ class LiveReporter {
     onStdErr(chunk, test, result) {
         const text = chunk.toString();
         for (const line of text.split(/\r?\n/)) {
-            if (!line.includes('[insightest]')) continue;
+            if (!line.includes('[insightest]') && !line.includes('[insightest-heal]')) continue;
             console.log(`      ${RED}${line.trim()}${RESET}`);
         }
     }

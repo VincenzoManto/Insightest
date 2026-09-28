@@ -9,6 +9,7 @@ export type Locale = 'en' | 'it';
 const it: Record<string, string> = {
   'Analysis unavailable: this self-healing engine needs a "baseline" (a map of the tested site) that is not yet created automatically for Insightest projects. The failure log is still saved below for manual inspection.':
     'Analisi non disponibile: questo motore di self-healing ha bisogno di una "baseline" (una mappa del sito testato) che per ora non viene creata automaticamente per i progetti Insightest. Il log del fallimento resta comunque salvato qui sotto per l\'ispezione manuale.',
+  '▶▶ Asking Claude to fix the steps that could not be repaired automatically': '▶▶ Chiedo a Claude di correggere i passaggi che non è stato possibile riparare in automatico',
   '▶▶ Re-running the test to capture the current state of the page': '▶▶ Rieseguo il test per catturare lo stato attuale della pagina',
   '▶▶ Analyzing the selectors used by the test (ia-qa-heal ingest)': '▶▶ Analizzo i selettori usati dal test (ia-qa-heal ingest)',
   '▶▶ Comparing against the baseline (ia-qa-heal diff)': '▶▶ Confronto con la baseline (ia-qa-heal diff)',

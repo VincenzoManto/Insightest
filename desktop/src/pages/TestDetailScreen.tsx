@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Play, Pencil, Wrench, Globe, MousePointerClick, Type, CheckSquare, ChevronDown, ChevronUp, Keyboard, Code2, Video, Tag as TagIcon, StickyNote, X, Plus, Save, MoreVertical, FileText, CheckCircle2, XCircle, CircleDot, FolderOpen, Hourglass } from 'lucide-react';
+import { ArrowLeft, Play, Pencil, Wand2, Wrench, Globe, MousePointerClick, Type, CheckSquare, ChevronDown, ChevronUp, Keyboard, Code2, Video, Tag as TagIcon, StickyNote, X, Plus, Save, MoreVertical, FileText, CheckCircle2, XCircle, CircleDot, FolderOpen, Hourglass } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import { computeStepStatuses, type StatusStep, type StepStatus } from '../stepStatus';
 import { StepEditorDrawer } from '../components/StepEditorDrawer';
 import { RunProgressRing } from '../components/RunProgressRing';
+import { HealPanel } from '../components/HealPanel';
 import { countLoggedActions, countStartedActions, runningPercent } from '../runProgress';
 import { parseSelectorPriority } from '../components/SelectorPriorityEditor';
 import { ACTION_LABEL, META_METHODS, hasSelector, newStep, parseBuilderTest, serializeBuilderTest, stepDetail, stepPrimaryLabel, type EditableStep, type ParsedBuilderTest, type StepAction } from '../stepModel';
@@ -312,6 +313,8 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
   const [recordUrl, setRecordUrl] = useState('https://');
   const [recording, setRecording] = useState(false);
   const [healingRunId, setHealingRunId] = useState<number | null>(null);
+  // Auto-heal panel (repairs broken steps on the live page, then asks for confirmation before saving).
+  const [healOpen, setHealOpen] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
   const [repairingRunId, setRepairingRunId] = useState<number | null>(null);
   const [repairResult, setRepairResult] = useState<HealResult | null>(null);
@@ -741,6 +744,12 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
     }
   }
 
+  // The newest run failed: auto-heal becomes the primary action.
+  const lastFailed = runs.length > 0 && (() => {
+    const newest = runs.reduce((a, r) => (a.id > r.id ? a : r));
+    return newest.status === 'failed' || newest.status === 'error';
+  })();
+
   // Progress ring of the local run (only for local runs, where the total number of actions is known).
   const startedActions = countStartedActions(liveLines);
   const runPercent = runOutcome === 'passed' ? 100 : runningPercent(startedActions, runTotal);
@@ -844,6 +853,8 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
 
   return (
     <>
+          {healOpen && project && <HealPanel project={project} testIds={[testId]} onClose={() => setHealOpen(false)} onSaved={() => void load()} />}
+
           {stepsDraft && editStepIndex !== null && stepsDraft.steps[editStepIndex] && (
         <StepEditorDrawer
           key={stepsDraft.steps[editStepIndex].key}
@@ -897,6 +908,14 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
           </label>
           <button onClick={runLocally} disabled={running}>
             <Play size={16} /> {running ? t('Running…') : t('Re-run')}
+          </button>
+          <button
+            className={lastFailed ? '' : 'secondary'}
+            onClick={() => setHealOpen(true)}
+            disabled={running || !project || !stepsDraft}
+            title={stepsDraft ? t('Repair the failing steps on the live page and review the changes') : t('This test uses the older recording format: re-import it (--update) to use auto-heal.')}
+          >
+            <Wand2 size={16} /> {t('Auto-heal')}
           </button>
           <button className="secondary" onClick={startEdit}>
             <Pencil size={16} /> {t('Edit')}

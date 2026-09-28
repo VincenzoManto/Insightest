@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, CircleDot, RefreshCw, Search, X, XCircle } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, CircleDot, RefreshCw, Search, Wand2, X, XCircle } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import type { CiRunRow, Folder, Project } from '../types';
 import { counts, filterGroups, folderPathOf, formatDuration, groupCiRuns, type CiRunGroup, type StatusFilter } from '../ciRuns';
+import { HealPanel } from '../components/HealPanel';
 import { formatDateTime, t } from '../i18n';
 
 // eslint-disable-next-line no-control-regex
@@ -62,6 +63,8 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
   const [status, setStatus] = useState<StatusFilter>('all');
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [logs, setLogs] = useState<Record<number, { loading: boolean; text: string }>>({});
+  // Tests handed to the auto-heal panel (the failed ones of a run, or a single one).
+  const [healIds, setHealIds] = useState<number[] | null>(null);
 
   async function load(): Promise<void> {
     setLoading(true);
@@ -140,6 +143,18 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
 
         {isOpen && (
           <div className="border-t border-gridline">
+            {c.failed > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gridline bg-critical/5 px-4 py-2">
+                <span className="text-xs text-ink-secondary">{t('{n} test(s) failed in this run', { n: c.failed })}</span>
+                <button
+                  type="button"
+                  className="sm"
+                  onClick={() => setHealIds([...new Set(group.items.filter((r) => r.status === 'failed' || r.status === 'error').map((r) => r.test_id))])}
+                >
+                  <Wand2 size={13} /> {t('Auto-heal the failed tests')}
+                </button>
+              </div>
+            )}
             {group.items.map((r) => {
               const failed = r.status === 'failed' || r.status === 'error';
               const log = logs[r.id];
@@ -153,6 +168,11 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
                     </button>
                     {folder && <span className="hidden min-w-0 truncate text-xs text-ink-muted md:inline">{folder}</span>}
                     <span className="ml-auto flex-shrink-0 text-xs text-ink-muted">{formatDuration(r.duration_ms ?? 0)}</span>
+                    {failed && (
+                      <button type="button" className="secondary sm flex-shrink-0" onClick={() => setHealIds([r.test_id])} title={t('Repair this test on the live page')}>
+                        <Wand2 size={12} /> {t('Heal')}
+                      </button>
+                    )}
                     {failed && (
                       <button type="button" className="secondary sm flex-shrink-0" onClick={() => void toggleLog(r)}>
                         {log ? t('Hide log') : t('Show log')}
@@ -225,6 +245,16 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
       <div className="flex flex-col gap-3">
         {visible.map((g, i) => renderGroup(g, i))}
       </div>
+
+      {healIds && (
+        <HealPanel
+          project={project}
+          testIds={healIds}
+          title={healIds.length > 1 ? t('Auto-heal: {n} failed tests', { n: healIds.length }) : t('Auto-heal')}
+          onClose={() => setHealIds(null)}
+          onSaved={() => void load()}
+        />
+      )}
     </div>
   );
 }

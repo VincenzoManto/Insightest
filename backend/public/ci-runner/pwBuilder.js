@@ -29,9 +29,12 @@ class PlaywrightBuilder {
     this.page = page;
     this.variables = opts.variables || {};
     this.priority = Array.isArray(opts.priority) && opts.priority.length ? opts.priority : DEFAULT_PRIORITY;
-    this.timeouts = opts.timeouts || DEFAULT_ACTION_TIMEOUTS_MS;
+    // Heal mode: a step that cannot be performed is searched for on the live page instead of failing the run.
+    this.healMode = opts.heal !== undefined ? !!opts.heal : process.env.INSIGHTEST_HEAL === '1';
+    // While healing, broken steps should be detected fast (the heal search runs right after); navigation keeps its patience.
+    this.timeouts = opts.timeouts || (this.healMode ? [4000, 6000, 8000] : DEFAULT_ACTION_TIMEOUTS_MS);
     const navOverride = Number(process.env.INSIGHTEST_NAV_TIMEOUT_MS || 0) || null;
-    this.navTimeouts = opts.navTimeouts || (navOverride ? [navOverride, navOverride, navOverride] : this.timeouts);
+    this.navTimeouts = opts.navTimeouts || (navOverride ? [navOverride, navOverride, navOverride] : this.healMode ? DEFAULT_ACTION_TIMEOUTS_MS : this.timeouts);
     this.betweenActionMs = Number(process.env.INSIGHTEST_BETWEEN_ACTION_MS || 0);
     this.promptValue = '';
     this.confirmValue = true;
@@ -138,13 +141,17 @@ class PlaywrightBuilder {
       }
     }
     this.page.setDefaultTimeout(timeouts[timeouts.length - 1]);
+    const failedLabels = [mainLabel];
     for (const cand of cands.slice(1)) {
       console.log(`[insightest] Fallback 3/3 (selettore secondario): ${label} ${this._label(cand)}`);
       try {
         await perform(this._locator(cand));
+        // The step passed, but only thanks to a recorded alternative: the selectors tried before it are stale.
+        this._emitHeal({ ...this._ref(meta), action: label, failed: mainLabel, failedAll: failedLabels, kind: 'selector', selector: cand.text !== undefined ? `text=${JSON.stringify(cand.text)}` : cand.sel, strategy: 'recorded-alternative', confidence: 0.9, matches: 1, evidence: 'another selector recorded for this step still works' });
         return true;
       } catch (e) {
         lastError = e;
+        failedLabels.push(this._label(cand));
       }
     }
     if (cands.length === 1 && meta && meta.textHint) {
@@ -157,6 +164,13 @@ class PlaywrightBuilder {
         } catch (e) {
           lastError = e;
         }
+      }
+    }
+    if (this.healMode) {
+      try {
+        if (await this._heal(label, main, cands, perform, meta)) return true;
+      } catch (e) {
+        lastError = e;
       }
     }
     console.error(`[insightest] Azione fallita dopo 3 tentativi: ${label} ${mainLabel}`);
@@ -173,6 +187,185 @@ class PlaywrightBuilder {
       return false;
     }
     throw lastError;
+  }
+
+  // ------------------------------------------------------------------ self-healing
+  // With INSIGHTEST_HEAL=1 a step that still fails after its normal attempts does not just throw: the engine looks for
+  // the element on the LIVE page with deterministic strategies, performs the action on the first one that works and
+  // reports what it changed as `[insightest-heal] {json}` lines. The desktop app turns those into proposals the user
+  // reviews and saves; nothing is written to the test by the engine itself. Steps that only worked thanks to a
+  // recorded secondary selector are reported too (in any mode): the primary selector is stale.
+
+  _emitHeal(evt) {
+    let line = JSON.stringify(evt);
+    if (line.length > 14000) line = JSON.stringify({ ...evt, snapshot: undefined, truncated: true });
+    console.log('[insightest-heal] ' + line);
+  }
+
+  /** Which test (t: 0..n-1 = prerequisites in run order, last = the test itself) and which selector-bearing call (i). */
+  _ref(meta) {
+    return { t: meta && meta.__t !== undefined ? meta.__t : 0, i: meta && meta.__i !== undefined ? meta.__i : -1 };
+  }
+
+  /** What the recorded selectors tell us about the element: its data-test/id/name/label-for/text and xpath. */
+  _fingerprint(cands, meta) {
+    const fp = { dataAttr: 'data-test', dataTest: null, id: null, forAttr: null, name: null, text: null, xpath: null };
+    // Everything recorded for the step, including kinds the project's selector priority leaves out of normal runs
+    // (data-test, attributes): they are exactly what identifies the element when the used selector went stale.
+    const all = [...cands];
+    if (meta && meta.byKey && typeof meta.byKey === 'object') {
+      for (const [k, v] of Object.entries(meta.byKey)) {
+        if (!v || !String(v).trim()) continue;
+        all.push(k === 'text' ? { text: String(v) } : { sel: String(v).trim() });
+      }
+    }
+    for (const c of all) {
+      if (c.text !== undefined) {
+        if (!fp.text && String(c.text).trim()) fp.text = String(c.text).trim();
+        continue;
+      }
+      const s = String(c.sel || '');
+      let m = /\[(data-test(?:id)?)=["']?([^"'\]]+)["']?\]/.exec(s);
+      if (m && !fp.dataTest) { fp.dataAttr = m[1]; fp.dataTest = m[2]; }
+      m = /^#([\w-]+)/.exec(s.trim());
+      if (m && !fp.id) fp.id = m[1];
+      m = /\[for=["']?([^"'\]]+)["']?\]/.exec(s);
+      if (m && !fp.forAttr) fp.forAttr = m[1];
+      m = /\[name=["']?([^"'\]]+)["']?\]/.exec(s);
+      if (m && !fp.name) fp.name = m[1];
+      if (s.startsWith('xpath=') && !fp.xpath) fp.xpath = s.slice(6);
+    }
+    if (!fp.text && meta && meta.textHint && String(meta.textHint).trim()) fp.text = String(meta.textHint).trim();
+    // Framework-generated ids (select2-xxxx-container, ng-…, mat-…) change on every render: not a stable anchor.
+    fp.dynamicId = !!fp.id && /(select2|mat-|ng-|cdk-|ui-|react|:r\d)|\d{3,}/i.test(fp.id);
+    return fp;
+  }
+
+  /** Alternative selectors for the same element, each with how many visible elements it matches. */
+  async _healProbe(fp) {
+    const out = [];
+    const seen = new Set();
+    const add = async (strategy, selector, confidence, note) => {
+      if (seen.has(selector)) return;
+      seen.add(selector);
+      let matches = 0;
+      try { matches = await this.page.locator(selector).count(); } catch { return; }
+      if (!matches) return;
+      out.push({ strategy, selector, matches, confidence: matches === 1 ? confidence : confidence * 0.6, evidence: note });
+    };
+    const q = (s) => JSON.stringify(String(s));
+
+    if (fp.dataTest) await add('data-test', `[${fp.dataAttr}=${q(fp.dataTest)}]:visible`, 0.95, `same ${fp.dataAttr} "${fp.dataTest}"`);
+    if (fp.id && !fp.dynamicId) await add('id', `#${fp.id.replace(/([^\w-])/g, '\\$1')}:visible`, 0.9, `same id "${fp.id}"`);
+    if (fp.forAttr) await add('label-for', `label[for=${q(fp.forAttr)}]:visible`, 0.85, `label for "${fp.forAttr}"`);
+    if (fp.name) await add('name', `[name=${q(fp.name)}]:visible`, 0.85, `same name "${fp.name}"`);
+    if (fp.text) {
+      const esc = fp.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      await add('text', `text=${q(fp.text)}`, 0.8, `same visible text "${fp.text}"`);
+      await add('text', `text=/^\\s*${esc}\\s*$/i`, 0.7, `visible text "${fp.text}" (case-insensitive)`);
+      await add('aria-label', `[aria-label=${q(fp.text)} i]:visible`, 0.75, `aria-label "${fp.text}"`);
+      await add('placeholder', `[placeholder=${q(fp.text)} i]:visible`, 0.75, `placeholder "${fp.text}"`);
+    }
+    if (fp.xpath) {
+      // The page structure drifted (a wrapper added/removed): the tail of the recorded path is usually still right.
+      const segs = fp.xpath.split('/').filter(Boolean);
+      const tails = [];
+      for (let k = Math.min(segs.length - 1, 8); k >= 2; k--) tails.push(segs.slice(-k));
+      for (const tail of tails) {
+        await add('xpath-tail', `xpath=//${tail.join('/')}`, 0.7 - (0.2 * (8 - tail.length)) / 8, `end of the recorded path (${tail.length} levels)`);
+      }
+      // Anchored on the routed page component (app-…) with the structure in between relaxed.
+      const anchor = segs.findIndex((s) => /^app-/.test(s) && !/^app-root/.test(s));
+      if (anchor >= 0) {
+        for (const n of [4, 3, 2]) {
+          const tail = segs.slice(-n);
+          if (segs.length - n > anchor) await add('xpath-anchor', `xpath=//${segs[anchor]}//${tail.join('/')}`, 0.65, `inside ${segs[anchor]}`);
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Last resort for a failing step: returns true if the action was performed on an element found on the live page. */
+  async _heal(label, main, cands, perform, meta) {
+    const ref = this._ref(meta);
+    const base = { ...ref, action: label, failed: this._label(main), failedAll: cands.map((c) => this._label(c)) };
+    const fp = this._fingerprint(cands, meta);
+    this.page.setDefaultTimeout(4000);
+
+    /** Keeps retrying the ORIGINAL selector for a while: it may just be slow (present but hidden, or inserted late). */
+    const waitForOriginal = async (budgetMs) => {
+      const start = Date.now();
+      while (Date.now() - start < budgetMs) {
+        try {
+          await perform(this._locator(main));
+          const elapsed = Date.now() - start;
+          this._emitHeal({ ...base, kind: 'timing', strategy: 'wait', confidence: 0.6, timeoutMs: Math.ceil(((elapsed + 10000) * 1.3) / 1000) * 1000, evidence: `the element becomes actionable only ~${Math.round(elapsed / 1000) + 10}s after the step starts` });
+          return true;
+        } catch {}
+        await sleep(1000);
+      }
+      return false;
+    };
+
+    // 1) The element exists in the DOM but was not visible/enabled in time: wait a bit more.
+    try {
+      const raw = main.text !== undefined ? null : String(main.sel).replace(/\s*:visible\s*$/, '');
+      if (raw && (await this.page.locator(raw).count()) > 0 && (await waitForOriginal(12000))) return true;
+    } catch {}
+
+    // 2) Same element, found another way.
+    const probes = (await this._healProbe(fp)).sort((a, b) => b.confidence - a.confidence);
+    for (const p of probes) {
+      if (p.confidence < 0.5) continue;
+      try {
+        await perform(this.page.locator(p.selector).first());
+        this._emitHeal({ ...base, kind: 'selector', selector: p.selector, strategy: p.strategy, confidence: Math.round(p.confidence * 100) / 100, matches: p.matches, evidence: p.evidence });
+        return true;
+      } catch {}
+    }
+
+    // 3) Not found any other way: maybe the original is simply inserted late. Give it one long chance.
+    try {
+      if (await waitForOriginal(20000)) return true;
+    } catch {}
+
+    // 4) Text-similarity rescan (recorded text/tag hint).
+    if (meta && meta.textHint) {
+      const best = await this._findBySimilarity(meta.textHint, meta.tagHint);
+      if (best) {
+        try {
+          await perform(this.page.locator(best.selector).first());
+          this._emitHeal({ ...base, kind: 'selector', selector: best.selector, strategy: 'similarity', confidence: Math.round(Math.min(0.6, best.score) * 100) / 100, matches: 1, evidence: `element whose text is ${Math.round(best.score * 100)}% similar to "${meta.textHint}"` });
+          return true;
+        } catch {}
+      }
+    }
+
+    // 5) Unresolved: hand over what the page looks like now (for the AI healer and the user).
+    this._emitHeal({ ...base, kind: 'unresolved', snapshot: await this._pageDigest(), url: this.page.url() });
+    return false;
+  }
+
+  /** Compact description of the page's interactive elements at the moment a step could not be healed. */
+  async _pageDigest() {
+    try {
+      return await this.page.evaluate(() => {
+        const vis = (el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
+        const attr = (el, n) => (el.getAttribute(n) || '').slice(0, 60);
+        const els = Array.from(document.querySelectorAll('button,a,input,select,textarea,label,[role=button],[role=option],[role=tab],[data-test],[data-testid],h1,h2,h3')).filter(vis).slice(0, 70);
+        return {
+          title: document.title,
+          elements: els.map((el) => {
+            const o = { tag: el.tagName.toLowerCase(), text: (el.innerText || el.value || '').trim().replace(/\s+/g, ' ').slice(0, 50) };
+            for (const n of ['data-test', 'data-testid', 'id', 'name', 'type', 'aria-label', 'placeholder', 'role', 'for']) { const v = attr(el, n); if (v) o[n] = v; }
+            return o;
+          }),
+        };
+      });
+    } catch {
+      return null;
+    }
   }
 
   async _findBySimilarity(textHint, tagHint) {
@@ -395,8 +588,76 @@ class PlaywrightBuilder {
         await this.page.keyboard.press('Escape').catch(() => {});
       }
     }
+    // Heal mode: the option text no longer exists (renamed/typo): pick the closest one and report it.
+    if (this.healMode && typeof value === 'string' && /select2 option not found/.test(String(lastError && lastError.message))) {
+      if (await this._healSelect2(selector, value, meta, causesNavigation)) return;
+    }
     throw lastError;
   };
+
+  /** How alike two labels are, 0..1: word-prefix containment ("FORLI" ~ "Forlì (FC)") or edit distance. */
+  _textScore(a, b) {
+    const fold = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    const tok = (s) => fold(s).split(/[^a-z0-9]+/).filter(Boolean);
+    const ta = tok(a), tb = tok(b);
+    if (!ta.length || !tb.length) return 0;
+    let score = 0;
+    if (ta.every((x) => tb.some((y) => y.startsWith(x)))) score = Math.max(score, 0.85 - Math.min(0.3, (tb.length - ta.length) * 0.05));
+    const fa = ta.join(' '), fb = tb.join(' ');
+    const m = fa.length, n = fb.length, d = [];
+    for (let i = 0; i <= m; i++) d[i] = [i];
+    for (let j = 0; j <= n; j++) d[0][j] = j;
+    for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) d[i][j] = fa[i - 1] === fb[j - 1] ? d[i - 1][j - 1] : 1 + Math.min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1]);
+    score = Math.max(score, 1 - d[m][n] / Math.max(m, n));
+    return score;
+  }
+
+  async _healSelect2(selector, value, meta, causesNavigation) {
+    const ref = this._ref(meta);
+    try {
+      this.page.setDefaultTimeout(4000);
+      if (!(await this._do('Click', selector, (l) => l.click(), meta))) return false;
+      await this.page.locator('.select2-container--open').first().waitFor({ state: 'visible', timeout: 5000 });
+      const search = this.page.locator('.select2-container--open .select2-search__field').last();
+      const hasSearch = await search.isVisible().catch(() => false);
+      const options = this.page.locator('.select2-results__option:not(.select2-results__message):not(.loading-results):visible');
+      // Long/ajax lists only show what matches the search box: try the whole list, then shorter and shorter prefixes
+      // of the wanted text, and take the first query whose results contain something that resembles it.
+      const queries = hasSearch ? ['', value.slice(0, Math.max(3, Math.ceil(value.length / 2))), value.slice(0, 3), value.slice(0, 2)] : [null];
+      let picked = null;
+      const seenTexts = [];
+      for (const query of [...new Set(queries)]) {
+        if (query !== null) {
+          await search.fill(query);
+          await sleep(800); // ajax select2 debounces, then shows "Searching…"
+          for (let w = 0; w < 30 && (await this.page.locator('.select2-results__option.loading-results').count()) > 0; w++) await sleep(150);
+        }
+        const texts = (await options.allInnerTexts()).map((s) => s.trim());
+        seenTexts.push(...texts);
+        let best = -1, bestScore = 0;
+        texts.forEach((t, i) => {
+          const s = this._textScore(value, t);
+          if (s > bestScore) { bestScore = s; best = i; }
+        });
+        if (best >= 0 && bestScore >= 0.5) {
+          picked = { index: best, score: bestScore, texts };
+          break;
+        }
+      }
+      if (!picked) {
+        this._emitHeal({ ...ref, action: 'select2', failed: JSON.stringify(value), kind: 'unresolved', evidence: `no option resembles "${value}"`, snapshot: { options: [...new Set(seenTexts)].slice(0, 60) } });
+        await this.page.keyboard.press('Escape').catch(() => {});
+        return false;
+      }
+      await options.nth(picked.index).click();
+      this._emitHeal({ ...ref, action: 'select2', failed: JSON.stringify(value), kind: 'value', option: picked.texts[picked.index], strategy: 'closest-option', confidence: Math.round(picked.score * 0.9 * 100) / 100, evidence: `closest option to "${value}" among ${picked.texts.length} listed` });
+      await this._afterAction(causesNavigation);
+      return true;
+    } catch {
+      await this.page.keyboard.press('Escape').catch(() => {});
+      return false;
+    }
+  }
 
   async _select2Option(value) {
     // Real options only: not the "Searching…" / "No results found" message rows.

@@ -353,3 +353,164 @@ export function runAgentRepair(
     });
   });
 }
+
+/* ------------------------------------------------------------------ AI self-healing */
+
+/** A step the deterministic healer could not fix, with what the page looked like at that moment. */
+export interface AiHealStep {
+  /** Which test of the run (0..n-1 = prerequisites, n = the test itself) and which of its selector-bearing calls. */
+  t: number;
+  i: number;
+  testName: string;
+  stepNumber: number;
+  /** The step as it is now: action, every recorded selector, value. */
+  description: string;
+  /** Selector (or option text) that stopped working. */
+  failed: string;
+  evidence?: string;
+  url?: string;
+  /** Interactive elements visible on the page (tag, text, data-test, id, name, aria-label...) or the select2 options. */
+  snapshot?: { title?: string; elements?: Record<string, string>[]; options?: string[] } | null;
+}
+
+export interface AiHealRequest {
+  testName: string;
+  baseUrl?: string | null;
+  /** Local folder of the app's source: lets the AI find the real data-test/id attributes. */
+  repoPath?: string | null;
+  steps: AiHealStep[];
+}
+
+export interface AiHealFix {
+  t: number;
+  i: number;
+  selector?: string | null;
+  option?: string | null;
+  timeoutMs?: number | null;
+  why?: string;
+}
+
+export interface AiHealResult {
+  fixes: AiHealFix[];
+  log: string;
+  exitCode: number | null;
+  cancelled: boolean;
+}
+
+function buildAiHealPrompt(req: AiHealRequest): string {
+  const lines: string[] = [
+    `Il test end-to-end "${req.testName}" ha dei passaggi che non trovano più il loro elemento nell'applicazione (selettori non più validi). ` +
+      'Un sistema deterministico ha già provato a ripararli senza riuscirci. Devi proporre il selettore corretto per ciascun passaggio, ' +
+      "basandoti SOLO su ciò che c'è davvero nella pagina (snapshot qui sotto) e, se disponibile, nel codice sorgente dell'app.",
+  ];
+  if (req.repoPath) lines.push(`Il sorgente dell'applicazione è nella tua cartella di lavoro (${req.repoPath}): puoi cercarci gli attributi data-test/id reali con Grep/Read.`);
+  if (req.baseUrl) lines.push(`URL base dell'applicazione: ${req.baseUrl}`);
+  lines.push('');
+  for (const s of req.steps) {
+    lines.push(`=== Passaggio (t=${s.t}, i=${s.i}) — test "${s.testName}", passo ${s.stepNumber} ===`);
+    lines.push(`Come è scritto ora: ${s.description}`);
+    lines.push(`Non trova più: ${s.failed}`);
+    if (s.evidence) lines.push(`Nota: ${s.evidence}`);
+    if (s.url) lines.push(`Pagina: ${s.url}`);
+    if (s.snapshot?.options) lines.push(`Opzioni presenti nel menu a tendina:\n${JSON.stringify(s.snapshot.options)}`);
+    if (s.snapshot?.elements) lines.push(`Elementi interattivi visibili nella pagina in quel momento:\n${JSON.stringify(s.snapshot.elements)}`);
+    lines.push('');
+  }
+  lines.push(
+    '--- Regole ---',
+    '1. `selector` è una stringa di selettore Playwright usabile con page.locator(): CSS (es. `[data-test="Salva"]:visible`), oppure `xpath=//...`, oppure `text="Testo esatto"`.',
+    '2. Preferisci attributi stabili: data-test, id NON generati (niente id con numeri casuali o prefissi select2-/ng-/mat-), aria-label, testo visibile. Evita xpath posizionali lunghi.',
+    "3. Il selettore deve identificare UN SOLO elemento: quello che il passaggio voleva usare (stessa azione, stesso scopo). Se nello snapshot non c'è un candidato credibile, NON inventare: ometti quel passaggio.",
+    '4. Per un menu a tendina select2 non risolto, se una delle opzioni elencate corrisponde a ciò che il test voleva, restituisci `option` con il testo ESATTO di quell\'opzione (invece di `selector`).',
+    '5. `timeoutMs` solo se sei certo che l\'elemento esiste ma compare molto in ritardo.',
+    '',
+    'Rispondi SOLO con un blocco ```json, senza altro testo, in questa forma:',
+    '```json',
+    '{"fixes":[{"t":0,"i":2,"selector":"[data-test=\\"Salva\\"]:visible","option":null,"timeoutMs":null,"why":"breve motivo"}]}',
+    '```'
+  );
+  return lines.join('\n');
+}
+
+/** Pulls the fixes out of the model's answer: the last ```json block, else the first balanced {...} containing "fixes". */
+export function parseAiHealAnswer(text: string): AiHealFix[] {
+  const candidates: string[] = [];
+  for (const m of text.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)```/g)) candidates.push(m[1]);
+  // A bare {"fixes": …} object is only a fallback for answers without any fenced block (else it would pick the FIRST
+  // block's content and let it win over the model's final version).
+  const start = candidates.length ? -1 : text.indexOf('{"fixes"');
+  if (start >= 0) {
+    let depth = 0;
+    for (let i = start; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}' && --depth === 0) {
+        candidates.push(text.slice(start, i + 1));
+        break;
+      }
+    }
+  }
+  for (const raw of candidates.reverse()) {
+    try {
+      const parsed = JSON.parse(raw.trim());
+      if (parsed && Array.isArray(parsed.fixes)) {
+        return parsed.fixes
+          .filter((f: any) => f && Number.isInteger(f.t) && Number.isInteger(f.i))
+          .map((f: any) => ({
+            t: f.t,
+            i: f.i,
+            selector: typeof f.selector === 'string' ? f.selector : null,
+            option: typeof f.option === 'string' ? f.option : null,
+            timeoutMs: Number.isFinite(Number(f.timeoutMs)) && Number(f.timeoutMs) > 0 ? Number(f.timeoutMs) : null,
+            why: typeof f.why === 'string' ? f.why : undefined,
+          }));
+      }
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return [];
+}
+
+/**
+ * Asks Claude Code (print mode, read-only tools) for the selectors the deterministic healer could not find. It sees the
+ * page snapshot taken at the failure and, when a repo path is given, the app's source. The answer is data (JSON) that the
+ * app validates and re-runs: the AI never edits the test or the repo.
+ */
+export function runAiHeal(req: AiHealRequest, onLine?: (line: string) => void): Promise<AiHealResult> {
+  if (currentAiChild) return Promise.reject(new Error(m('A Claude request is already in progress')));
+  const prompt = buildAiHealPrompt(req);
+  return new Promise((resolve, reject) => {
+    aiCancelled = false;
+    const child = spawn(AGENT_BIN.claude, ['-p', '--allowedTools', 'Read,Grep,Glob'], {
+      cwd: req.repoPath || undefined,
+      shell: process.platform === 'win32',
+      env: process.env,
+    });
+    currentAiChild = child;
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => cancelAiTestRequest(), 10 * 60 * 1000);
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      currentAiChild = null;
+    };
+    child.stdout?.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      err += chunk.toString();
+      onLine?.(chunk.toString().trim());
+    });
+    child.on('error', (e) => {
+      cleanup();
+      reject(e);
+    });
+    child.on('close', (code) => {
+      const cancelled = aiCancelled;
+      cleanup();
+      resolve({ fixes: cancelled ? [] : parseAiHealAnswer(out), log: [out, err].filter(Boolean).join('\n'), exitCode: code, cancelled });
+    });
+    onLine?.(m('▶▶ Asking Claude to fix the steps that could not be repaired automatically'));
+    child.stdin?.end(prompt);
+  });
+}

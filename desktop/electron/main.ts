@@ -19,8 +19,10 @@ import {
   runAgentRepair,
   detectAiTestStatus,
   runAiTestRequest,
+  runAiHeal,
   cancelAiTestRequest,
   type AgentName,
+  type AiHealRequest,
   type AiTestRequest,
 } from './agentRepair';
 
@@ -91,7 +93,7 @@ ipcMain.handle('auth:clear', () => {
   if (fs.existsSync(authFilePath)) fs.unlinkSync(authFilePath);
 });
 
-ipcMain.handle('playwright:run', async (event, playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[] }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => {
+ipcMain.handle('playwright:run', async (event, playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => {
   return runPlaywrightTest(playwrightCode, options, dependencyCodes, (line) => event.sender.send('playwright:progress', line), steps, dependencySteps);
 });
 
@@ -136,6 +138,10 @@ ipcMain.handle('agent:ai-status', async () => {
 
 ipcMain.handle('agent:ai-test', async (event, req: AiTestRequest) => {
   return runAiTestRequest(req, (line) => event.sender.send('playwright:progress', line));
+});
+
+ipcMain.handle('agent:ai-heal', async (event, req: AiHealRequest) => {
+  return runAiHeal(req, (line) => event.sender.send('playwright:progress', line));
 });
 
 ipcMain.handle('agent:ai-cancel', () => {

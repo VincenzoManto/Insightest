@@ -464,3 +464,32 @@ export function stepDetail(step: EditableStep): string | undefined {
   if (['fill', 'type', 'select', 'select2', 'keydown'].includes(step.action) && step.value) return step.value;
   return undefined;
 }
+
+/* ------------------------------------------------------------------ helpers for the heal flow */
+
+/** The selector as the engine sees it (what a heal event reports as failed): `xpath=…`, css with `:visible`, or text. */
+export function storedSelectorLabel(step: EditableStep, key: SelectorKey): string {
+  const value = step.selectors[key];
+  if (!value || !value.trim()) return '';
+  const stored = toStored(key, value, step.visible);
+  return key === 'text' ? `text=${JSON.stringify(stored)}` : stored;
+}
+
+/**
+ * The step that is the `index`-th selector-bearing call of the test, counted exactly as the runner counts them
+ * (BUILDER_META_METHODS lines that are actually executed): the numbering heal events use.
+ */
+export function stepAtMetaIndex(parsed: ParsedBuilderTest, index: number): { step: EditableStep; position: number } | null {
+  let n = 0;
+  for (let position = 0; position < parsed.steps.length; position++) {
+    const step = parsed.steps[position];
+    if (step.action === 'raw') {
+      if (step.countsMeta) n++;
+      continue;
+    }
+    if (!step.enabled || !hasSelector(step.action)) continue;
+    if (n === index) return { step, position };
+    n++;
+  }
+  return null;
+}

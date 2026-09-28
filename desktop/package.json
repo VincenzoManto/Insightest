@@ -1,6 +1,6 @@
 {
   "name": "insightest-desktop",
-  "version": "2.1.6",
+  "version": "2.1.7",
   "license": "MIT",
   "description": "Desktop app for registering, managing and locally re-running E2E tests.",
   "main": "dist-electron/main.js",

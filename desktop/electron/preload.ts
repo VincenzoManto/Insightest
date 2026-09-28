@@ -69,7 +69,7 @@ contextBridge.exposeInMainWorld('insightest', {
     clear: (): Promise<void> => ipcRenderer.invoke('auth:clear'),
   },
   playwright: {
-    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[] }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]): Promise<RunResult> =>
+    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]): Promise<RunResult> =>
       ipcRenderer.invoke('playwright:run', playwrightCode, options, dependencyCodes, steps, dependencySteps),
     record: (startUrl: string): Promise<string | null> =>
       ipcRenderer.invoke('playwright:record', startUrl),
@@ -100,6 +100,7 @@ contextBridge.exposeInMainWorld('insightest', {
       ipcRenderer.invoke('agent:run-repair', agent, repoPath, prompt),
     aiStatus: (): Promise<AiTestStatus> => ipcRenderer.invoke('agent:ai-status'),
     aiTest: (req: AiTestRequest): Promise<AiTestResult> => ipcRenderer.invoke('agent:ai-test', req),
+    aiHeal: (req: unknown): Promise<unknown> => ipcRenderer.invoke('agent:ai-heal', req),
     aiCancel: (): Promise<boolean> => ipcRenderer.invoke('agent:ai-cancel'),
   },
   i18n: {

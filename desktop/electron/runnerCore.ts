@@ -3,11 +3,61 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { m } from './messages';
 
+/**
+ * What the engine's heal mode found while a run was in progress (see pwBuilder.js `_heal`): one event per step it had
+ * to fix or could not fix. `t`/`i` locate the step: test `t` of the run (0..n-1 = prerequisites oldest first, n = the
+ * test itself) and its `i`-th selector-bearing call (the index into that test's steps_json).
+ */
+export interface HealEvent {
+  t: number;
+  i: number;
+  kind: 'selector' | 'timing' | 'value' | 'unresolved';
+  action: string;
+  /** The selector (or option text) that stopped working. */
+  failed: string;
+  /** Every selector the step had that turned out stale (the one above plus the alternatives tried before the fix). */
+  failedAll?: string[];
+  /** New Playwright selector, for kind 'selector'. */
+  selector?: string;
+  /** New option text, for kind 'value' (select2). */
+  option?: string;
+  /** Suggested fixed timeout in ms, for kind 'timing'. */
+  timeoutMs?: number;
+  strategy?: string;
+  confidence?: number;
+  matches?: number;
+  evidence?: string;
+  url?: string;
+  /** Interactive elements of the page when the step could not be healed (for the AI healer). */
+  snapshot?: { title?: string; elements?: Record<string, string>[]; options?: string[] } | null;
+}
+
+const HEAL_LINE_RE = /\[insightest-heal\]\s+(\{.*\})\s*$/;
+
+/** Reads the heal events a run printed. The reporter may print them twice (test output + live line): deduplicated. */
+export function parseHealEvents(log: string): HealEvent[] {
+  const seen = new Set<string>();
+  const events: HealEvent[] = [];
+  for (const line of log.split(/\r?\n/)) {
+    const m = HEAL_LINE_RE.exec(line);
+    if (!m || seen.has(m[1])) continue;
+    seen.add(m[1]);
+    try {
+      events.push(JSON.parse(m[1]) as HealEvent);
+    } catch {
+      /* a truncated line: ignore */
+    }
+  }
+  return events;
+}
+
 export interface PlaywrightRunResult {
   status: 'passed' | 'failed' | 'error';
   durationMs: number;
   log: string;
   healingDetail?: string;
+  /** Only when the run was made with `heal: true`. */
+  healEvents?: HealEvent[];
 }
 
 export interface PlaywrightRunOptions {
@@ -16,6 +66,8 @@ export interface PlaywrightRunOptions {
   betweenActionMs?: number;
   /** Project's selector priority (kinds, in order) used by PlaywrightBuilder tests; default when omitted. */
   selectorPriority?: string[];
+  /** Self-healing run: broken steps are fixed on the fly and reported as heal events instead of failing the run. */
+  heal?: boolean;
 }
 
 export interface BaselineResult {
@@ -307,10 +359,12 @@ function usesBuilder(code: string): boolean {
 
 /** Strips the stored `const pw = ...` line (supplied once by withBuilderRuntime) and prefixes each selector-bearing
  * call with its recorded metadata, by position. Must run on ONE test's body at a time, before bodies are combined. */
-function instrumentBuilderCalls(body: string, steps: ResilientStepMeta[] | null | undefined): string {
+function instrumentBuilderCalls(body: string, steps: ResilientStepMeta[] | null | undefined, testRef = 0): string {
   let stepIndex = 0;
   return body.replace(BUILDER_CTOR_RE, '').replace(BUILDER_CALL_RE, (_m, indent: string, method: string) => {
-    const meta = steps && steps[stepIndex] ? steps[stepIndex] : null;
+    const recorded = steps && steps[stepIndex] ? steps[stepIndex] : null;
+    // __t/__i tell the heal engine which step of which test this call is (see HealEvent).
+    const meta = { ...(recorded ?? {}), __t: testRef, __i: stepIndex };
     stepIndex += 1;
     return `${indent}pw.useMeta(${JSON.stringify(meta)});\n${indent}await pw.${method}(`;
   });
@@ -569,7 +623,8 @@ async function executeSpec(
   // Builder actions retry with escalating timeouts (8s/15s/20s) and settle after navigations, so each one can
   // legitimately take far longer than a bare Playwright call.
   const builderActionCount = (source.match(/^\s*await pw\./gm) ?? []).length;
-  const timeoutMs = Math.max(30000, Math.round((explicitWaitMs + slowMoOverheadMs) * 1.5) + 30000 + builderActionCount * 6000);
+  // A heal run may wait up to ~40s per broken step (probing + a long retry of the original selector).
+  const timeoutMs = Math.max(30000, Math.round((explicitWaitMs + slowMoOverheadMs) * 1.5) + 30000 + builderActionCount * (options.heal ? 45000 : 6000));
   const liveReporterPath = getPaths().liveReporterPath;
   const reportPathForConfig = reportPath.replace(/\\/g, '/');
   // A dedicated config (rather than bare CLI flags) is needed for the inter-action delay
@@ -600,6 +655,7 @@ async function executeSpec(
       // Same betweenActionMs value drives both Playwright's own slowMo (config above) and
       // the resilient-action engine's retry-wait sleep -- there is no separate "slowMo" knob.
       INSIGHTEST_BETWEEN_ACTION_MS: String(Math.max(0, options.betweenActionMs ?? 0)),
+      ...(options.heal ? { INSIGHTEST_HEAL: '1' } : {}),
       ...extraEnv,
     },
     onLine,
@@ -643,7 +699,8 @@ export async function runPlaywrightTest(
   // it is positional (steps_json[i] belongs to the i-th call of that test) and the bodies are
   // combined below. Legacy-format tests keep going through executeSpec's own instrumentation.
   const mainIsBuilder = usesBuilder(playwrightCode);
-  const mainCode = mainIsBuilder ? replaceTestBody(playwrightCode, instrumentBuilderCalls(extractTestBody(playwrightCode), steps)) : playwrightCode;
+  const mainRef = (dependencyCodes ?? []).length;
+  const mainCode = mainIsBuilder ? replaceTestBody(playwrightCode, instrumentBuilderCalls(extractTestBody(playwrightCode), steps, mainRef)) : playwrightCode;
 
   // Each ancestor's own steps run first, in the same test/page (oldest ancestor first), so
   // its session (login cookies, storage) carries over -- without ever storing its steps
@@ -652,7 +709,7 @@ export async function runPlaywrightTest(
   const dependencyBodies = (dependencyCodes ?? [])
     .map((c, i) => {
       const body = extractTestBody(c);
-      return usesBuilder(c) ? instrumentBuilderCalls(body, dependencySteps?.[i]) : body;
+      return usesBuilder(c) ? instrumentBuilderCalls(body, dependencySteps?.[i], i) : body;
     })
     .join('\n');
   // Same anchoring as extractTestBody above: must require `async` before the arrow, or this
@@ -682,6 +739,7 @@ export async function runPlaywrightTest(
 
   const { workDir, ...result } = await executeSpec(finalSource, options, {}, onLine, mainIsBuilder ? null : steps);
   fs.rmSync(workDir, { recursive: true, force: true });
+  if (options.heal) return { ...result, healEvents: parseHealEvents(result.log) };
   // Only worth classifying an actual failure; a passed/errored-before-running-anything
   // run has no drift-vs-bug question to answer.
   const healingDetail = result.status === 'failed' ? await explainFailure(result.log) : undefined;

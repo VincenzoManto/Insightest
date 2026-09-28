@@ -25,11 +25,11 @@ class LiveReporter {
   // Playwright buffers the test's own console output per test; forward the resilient engine's
   // `[insightest] ...` lines so they land in the run log (used to tell which step a run stopped on).
   onStdOut(chunk) {
-    for (const line of chunk.toString().split('\n')) if (line.includes('[insightest]')) console.log(line.trim());
+    for (const line of chunk.toString().split('\n')) if (line.includes('[insightest]') || line.includes('[insightest-heal]')) console.log(line.trim());
   }
 
   onStdErr(chunk) {
-    for (const line of chunk.toString().split('\n')) if (line.includes('[insightest]')) console.log(line.trim());
+    for (const line of chunk.toString().split('\n')) if (line.includes('[insightest]') || line.includes('[insightest-heal]')) console.log(line.trim());
   }
 
   onTestEnd(test, result) {

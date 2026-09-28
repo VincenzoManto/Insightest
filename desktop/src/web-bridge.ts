@@ -37,6 +37,7 @@ const webBridge: InsightestBridge = {
     runRepair: desktopOnly,
     aiStatus: async () => ({ claude: false, insightestMcp: false, playwrightMcp: false }),
     aiTest: desktopOnly,
+    aiHeal: desktopOnly,
     aiCancel: async () => false,
   },
   i18n: { setLocale: async () => {} },

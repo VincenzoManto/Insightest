@@ -16,6 +16,9 @@ final class RunController
     /** Runs are capped per test so the DB doesn't grow unbounded; always keep at least 1 passed run as evidence the test ever worked. */
     private const MAX_RUNS_PER_TEST = 7;
 
+    /** CI runs are kept per pipeline execution: only the last N executions of a project stay in the DB. */
+    private const MAX_CI_RUNS = 7;
+
     public static function index(Request $req): void
     {
         $testId = (int) $req->params['testId'];
@@ -113,15 +116,75 @@ final class RunController
         ]);
 
         $newRunId = (int) $pdo->lastInsertId();
-        self::pruneRuns($pdo, $testId);
+        if ($triggeredBy === 'ci' && $runKey !== null) {
+            self::pruneCiRuns($pdo, $testId);
+        } else {
+            self::pruneRuns($pdo, $testId);
+        }
 
         Response::json(['id' => $newRunId], 201);
     }
 
-    /** Keeps only the most recent MAX_RUNS_PER_TEST runs for a test, but always preserves at least one passed run if one exists. */
+    /**
+     * Keeps only the MAX_CI_RUNS most recent CI pipeline executions of the project (every result of those runs,
+     * whatever the test), and drops everything older. "Most recent" is by each run's newest result, so a run still
+     * reporting its results is always among the kept ones.
+     */
+    private static function pruneCiRuns(\PDO $pdo, int $testId): void
+    {
+        $projectStmt = $pdo->prepare('SELECT project_id FROM tests WHERE id = ?');
+        $projectStmt->execute([$testId]);
+        $projectId = (int) $projectStmt->fetchColumn();
+        if ($projectId === 0) {
+            return;
+        }
+
+        $stmt = $pdo->prepare(
+            "SELECT r.run_key
+             FROM test_runs r JOIN tests t ON t.id = r.test_id
+             WHERE t.project_id = ? AND r.triggered_by = 'ci' AND r.run_key IS NOT NULL
+             GROUP BY r.run_key
+             ORDER BY MAX(r.created_at) DESC, MAX(r.id) DESC"
+        );
+        $stmt->execute([$projectId]);
+        $runKeys = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        if (count($runKeys) < self::MAX_CI_RUNS) {
+            return;
+        }
+
+        // Results recorded before runs had an id can't be placed among the last N runs: once N identified runs
+        // exist, they are older than all of them.
+        $pdo->prepare(
+            "DELETE FROM test_runs
+             WHERE triggered_by = 'ci' AND run_key IS NULL
+               AND test_id IN (SELECT id FROM tests WHERE project_id = ?)"
+        )->execute([$projectId]);
+
+        $stale = array_slice($runKeys, self::MAX_CI_RUNS);
+        if ($stale) {
+            $placeholders = implode(',', array_fill(0, count($stale), '?'));
+            $pdo->prepare(
+                "DELETE FROM test_runs
+                 WHERE triggered_by = 'ci' AND run_key IN ($placeholders)
+                   AND test_id IN (SELECT id FROM tests WHERE project_id = ?)"
+            )->execute(array_merge($stale, [$projectId]));
+        }
+    }
+
+    /**
+     * Per-test cap for everything that is NOT a CI run with an id: desktop runs, and CI rows recorded without one
+     * (older runner). Each group is capped on its own, so a burst of local runs never evicts CI history.
+     */
     private static function pruneRuns(\PDO $pdo, int $testId): void
     {
-        $stmt = $pdo->prepare('SELECT id, status FROM test_runs WHERE test_id = ? ORDER BY created_at DESC, id DESC');
+        self::pruneScope($pdo, $testId, "triggered_by = 'desktop'");
+        self::pruneScope($pdo, $testId, "triggered_by = 'ci' AND run_key IS NULL");
+    }
+
+    /** Keeps only the most recent MAX_RUNS_PER_TEST runs of a test within `$scope` (a constant SQL condition), but always preserves at least one passed run if one exists. */
+    private static function pruneScope(\PDO $pdo, int $testId, string $scope): void
+    {
+        $stmt = $pdo->prepare("SELECT id, status FROM test_runs WHERE test_id = ? AND ($scope) ORDER BY created_at DESC, id DESC");
         $stmt->execute([$testId]);
         $rows = $stmt->fetchAll();
         if (count($rows) <= self::MAX_RUNS_PER_TEST) {
@@ -150,7 +213,8 @@ final class RunController
         }
 
         $placeholders = implode(',', array_fill(0, count($keepIds), '?'));
-        $delete = $pdo->prepare("DELETE FROM test_runs WHERE test_id = ? AND id NOT IN ($placeholders)");
+        // Only ever touches rows inside `$scope`: CI runs that carry an id are governed by pruneCiRuns().
+        $delete = $pdo->prepare("DELETE FROM test_runs WHERE test_id = ? AND ($scope) AND id NOT IN ($placeholders)");
         $delete->execute(array_merge([$testId], $keepIds));
     }
 
