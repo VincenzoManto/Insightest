@@ -40,13 +40,11 @@ set_exception_handler(function (\Throwable $e): void {
 Config::assertProductionSecrets();
 
 $config = Config::get();
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-if ($origin && in_array($origin, $config['cors_allowed_origins'], true)) {
-    header('Access-Control-Allow-Origin: ' . $origin);
-    header('Vary: Origin');
-    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Api-Key');
-    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-}
+// Wildcard on purpose: no cookies/credentialed requests cross this API (auth is bearer-token /
+// API-key based), so '*' is safe and needs no per-origin allowlist to keep in sync.
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Api-Key, X-Body-Encoding');
+header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     http_response_code(204);
     exit;

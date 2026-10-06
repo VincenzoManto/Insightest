@@ -1,8 +1,6 @@
 // Minimal, deterministic Playwright config for CI runs (no retries/AI healing by default).
 // timeout/retries/slowMo are optionally overridden per-invocation via runner.js's CLI flags
 // (--timeout, --resilient, --betweenActionMs), passed through as env vars below.
-//
-// NOTE: mirrors ci-runner/playwright.config.js; served statically from backend/public/ci-runner/.
 module.exports = {
     // Generated spec files live in their own temp dir, separate from this config's directory
     // (which only holds node_modules); without this, Playwright's default testDir (the config's
@@ -19,6 +17,11 @@ module.exports = {
         headless: true,
         trace: 'retain-on-failure',
         screenshot: 'only-on-failure',
-        launchOptions: process.env.PW_SLOWMO ? { slowMo: Number(process.env.PW_SLOWMO) } : {},
+        launchOptions: {
+            ...(process.env.PW_SLOWMO ? { slowMo: Number(process.env.PW_SLOWMO) } : {}),
+            // Lets old machines that can't run Playwright's bundled Chromium build (e.g. Windows
+            // versions below Chromium's minimum) drive a system-installed Chrome/Edge instead.
+            ...(process.env.PW_CHROME_PATH ? { executablePath: process.env.PW_CHROME_PATH } : {}),
+        },
     },
 };

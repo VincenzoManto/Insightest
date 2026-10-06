@@ -17,6 +17,11 @@ module.exports = {
         headless: true,
         trace: 'retain-on-failure',
         screenshot: 'only-on-failure',
-        launchOptions: process.env.PW_SLOWMO ? { slowMo: Number(process.env.PW_SLOWMO) } : {},
+        launchOptions: {
+            ...(process.env.PW_SLOWMO ? { slowMo: Number(process.env.PW_SLOWMO) } : {}),
+            // Lets old machines that can't run Playwright's bundled Chromium build (e.g. Windows
+            // versions below Chromium's minimum) drive a system-installed Chrome/Edge instead.
+            ...(process.env.PW_CHROME_PATH ? { executablePath: process.env.PW_CHROME_PATH } : {}),
+        },
     },
 };

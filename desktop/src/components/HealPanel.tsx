@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ArrowRight, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Loader2, RotateCcw, Save, ShieldCheck, Wand2, X, XCircle } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
-import type { Project, TestDetail } from '../types';
+import type { Project, TestDetail, TestSummary } from '../types';
 import { parseSelectorPriority } from './SelectorPriorityEditor';
 import { buildSave, healTests, newHealState, verifyTarget, type HealFlowDeps, type HealFlowState, type TargetStatus } from '../healFlow';
 import type { HealProposal } from '../healing';
@@ -62,6 +62,7 @@ const STRATEGY_LABEL: Record<string, string> = {
   similarity: 'similar text',
   wait: 'the element is just slow',
   'closest-option': 'closest option',
+  'similar-test': 'found in a similar test',
   ai: 'suggested by Claude',
 };
 
@@ -135,6 +136,10 @@ export function HealPanel({
       loadTest: (id) => api.get<TestDetail>(`/tests/${id}`),
       run: (code, options, dependencyCodes, steps, dependencySteps) => window.insightest.playwright.run(code, options, dependencyCodes, steps, dependencySteps),
       aiHeal: (req) => window.insightest.agent.aiHeal(req),
+      loadProjectTests: async () => {
+        const { tests } = await api.get<{ tests: TestSummary[] }>(`/projects/${project.id}/tests`);
+        return Promise.all(tests.map((t) => api.get<TestDetail>(`/tests/${t.id}`)));
+      },
       useAi: useAi && aiAvailable,
       priority,
       baseUrl: project.base_url,

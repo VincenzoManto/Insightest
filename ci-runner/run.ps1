@@ -6,18 +6,27 @@
 # Usage:   iwr <baseUrl>/ci-runner/run.ps1 -OutFile run.ps1; ./run.ps1 --key <API_KEY>
 # Optional flags: --url <base-url> (self-hosted only) --timeout <ms> --resilient
 #                 --betweenActionMs <ms> --output <path> --navTimeout <ms> --runfailed
+#                 --chromePath <path-to-chrome.exe>  (old machines that can't run Playwright's
+#                 bundled Chromium: drives a system-installed Chrome/Edge instead, and skips
+#                 downloading Chromium below)
 $ErrorActionPreference = "Stop"
 
 # Matches wherever this script itself is hosted; only self-hosted deployments need --url.
 $DefaultBaseUrl = "https://www.insightest.app/app/api"
 
 $baseUrl = $DefaultBaseUrl
+$chromePath = $null
 $passArgs = New-Object System.Collections.Generic.List[string]
 $originalDir = (Get-Location).Path
 
 for ($i = 0; $i -lt $args.Count; $i++) {
     if ($args[$i] -eq '--url') {
         $baseUrl = $args[$i + 1]
+        $i++
+    } elseif ($args[$i] -eq '--chromePath') {
+        $chromePath = $args[$i + 1]
+        $passArgs.Add('--chromePath')
+        $passArgs.Add($chromePath)
         $i++
     } elseif ($args[$i] -eq '--output') {
         $out = $args[$i + 1]
@@ -42,7 +51,13 @@ try {
     }
 
     npm install --no-audit --no-fund
-    npx playwright install --with-deps chromium
+    if ($chromePath) {
+        if (-not (Test-Path $chromePath)) {
+            throw "--chromePath '$chromePath' does not exist on this machine."
+        }
+    } else {
+        npx playwright install --with-deps chromium
+    }
 
     node runner.js --url $baseUrl @passArgs
     $exitCode = $LASTEXITCODE

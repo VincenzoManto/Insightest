@@ -45,6 +45,8 @@ const it: Record<string, string> = {
   'Create a new account': 'Crea nuovo account',
   'I already have an account': 'Ho già un account',
   'Record, manage and re-run end-to-end tests.': 'Registra, gestisci e riesegui test end-to-end.',
+  'Privacy Policy': 'Privacy',
+  'Terms of Service': 'Termini di servizio',
 
   // orgs
   'Your organizations': 'Le tue organizzazioni',

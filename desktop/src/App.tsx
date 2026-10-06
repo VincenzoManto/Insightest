@@ -12,6 +12,7 @@ import { CiRunsScreen } from './pages/CiRunsScreen';
 import { Brand } from './components/Brand';
 import { t } from './i18n';
 import { LanguageSwitcher } from './components/LanguageSwitcher';
+import { LegalLinks } from './components/LegalLinks';
 import type { Organization, Project, SharedProject } from './types';
 
 function NavItem({
@@ -138,6 +139,10 @@ export function App(): React.ReactElement {
 
         <div className="mb-2 px-1">
           <LanguageSwitcher dark />
+        </div>
+
+        <div className="mb-3">
+          <LegalLinks dark />
         </div>
 
         <div className="flex items-center gap-2.5 rounded-xl border border-sidebar-border px-2.5 py-2">

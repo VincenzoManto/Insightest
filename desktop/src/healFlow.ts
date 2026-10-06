@@ -8,6 +8,7 @@ import type { AiHealRequest, AiHealResult, ResilientStepMeta, RunResult } from '
 import type { TestDetail } from './types';
 import { parseBuilderTest, serializeBuilderTest, type ParsedBuilderTest } from './stepModel';
 import { applyProposals, applyToTests, eventsFromAiFixes, proposalsFromEvents, type HealProposal, type HealTest, type UnresolvedStep } from './healing';
+import { findMissingSteps, proposalsFromMissingSteps, type OtherTest } from './missingSteps';
 
 export type TargetState = 'pending' | 'running' | 'healed' | 'nochange' | 'unresolved' | 'failed' | 'unsupported';
 
@@ -29,6 +30,9 @@ export interface HealFlowDeps {
     dependencySteps: (ResilientStepMeta[] | null)[]
   ) => Promise<RunResult>;
   aiHeal?: (req: AiHealRequest) => Promise<AiHealResult>;
+  /** Every other test of the project, full detail (code + steps_json), used to spot steps a similar test has that
+   * the one being healed does not. Omit to skip that check. */
+  loadProjectTests?: () => Promise<TestDetail[]>;
   useAi: boolean;
   priority: string[];
   baseUrl?: string | null;
@@ -51,10 +55,43 @@ export interface HealFlowState {
   proposals: HealProposal[];
   /** Steps nobody could repair (the run stopped there). */
   unresolved: UnresolvedStep[];
+  /** Every other test of the project, parsed once and reused across targets (null = not loaded yet). */
+  otherTests: OtherTest[] | null;
+  /** Targets already checked against similar tests, so the comparison runs once per target even across AI rounds. */
+  missingStepsChecked: Set<number>;
 }
 
 export function newHealState(): HealFlowState {
-  return { originals: new Map(), drafts: new Map(), proposals: [], unresolved: [] };
+  return { originals: new Map(), drafts: new Map(), proposals: [], unresolved: [], otherTests: null, missingStepsChecked: new Set() };
+}
+
+/** Compares `testId`'s current draft against the other tests of the project and turns any step they have that this
+ * one doesn't into a reviewable proposal. Loads and caches every other test's full detail once per heal session. */
+async function checkMissingSteps(testId: number, deps: HealFlowDeps, state: HealFlowState): Promise<void> {
+  if (!deps.loadProjectTests || state.missingStepsChecked.has(testId)) return;
+  state.missingStepsChecked.add(testId);
+  try {
+    if (!state.otherTests) {
+      const all = await deps.loadProjectTests();
+      state.otherTests = all
+        .map((t) => {
+          const parsed = parseBuilderTest(t.playwright_code, t.steps_json);
+          return parsed ? { testId: t.id, name: t.name, parsed } : null;
+        })
+        .filter((x): x is OtherTest => x !== null);
+    }
+    const draft = state.drafts.get(testId);
+    const original = state.originals.get(testId);
+    if (!draft || !original) return;
+    const others = state.otherTests.filter((o) => o.testId !== testId);
+    const candidates = findMissingSteps(draft.steps, others);
+    if (candidates.length) {
+      deps.onLog(`   ${candidates.length} possible missing step(s) found by comparing with similar tests`);
+      state.proposals.push(...proposalsFromMissingSteps(testId, original.detail.name, candidates));
+    }
+  } catch {
+    /* best-effort: a failure here must never block the rest of the heal flow */
+  }
 }
 
 const MAX_AI_ROUNDS = 2;
@@ -106,6 +143,8 @@ async function healTarget(testId: number, deps: HealFlowDeps, state: HealFlowSta
   const chain = loaded;
   const target = state.originals.get(testId)!.detail;
   const proposalsBefore = state.proposals.length;
+
+  await checkMissingSteps(testId, deps, state);
 
   let aiRounds = 0;
   let last: RunResult | null = null;

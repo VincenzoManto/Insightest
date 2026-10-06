@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
@@ -66,6 +66,22 @@ function createWindow(): void {
   });
   win.webContents.on('unresponsive', () => {
     console.error('[insightest] renderer became unresponsive');
+  });
+
+  // External links (e.g. the Privacy Policy / Terms of Service in the sidebar and login screen)
+  // open in the OS default browser instead of a bare new Electron window.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (devServerUrl && url.startsWith(devServerUrl)) return;
+    event.preventDefault();
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url);
+    }
   });
 
   if (devServerUrl) {

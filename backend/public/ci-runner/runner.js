@@ -10,10 +10,10 @@
 // escalates 8000/15000/20000ms); does not affect other action retries.
 // --runfailed: only reruns tests whose last CI run failed/errored, plus any prerequisite test
 // (depends_on_test_id chain) needed to reach them -- instead of the whole suite.
-//
-// NOTE: this file is served statically from backend/public/ci-runner/ (see .htaccess), and is
-// downloaded fresh by run.ps1/run.sh/run.cmd on every CI invocation -- it is a mirror of
-// ci-runner/runner.js in this repo and should be kept in sync with it.
+// --chromePath <path> (or INSIGHTEST_CHROME_PATH env var): launches a system-installed
+// Chrome/Edge instead of Playwright's bundled Chromium build -- for old machines whose OS is
+// below Chromium's minimum supported version. Skip `npx playwright install chromium` in run.ps1
+// when this is set.
 //
 // NOTE: this file is served statically from backend/public/ci-runner/ (see .htaccess), and is
 // downloaded fresh by run.ps1/run.sh/run.cmd on every CI invocation -- it is a mirror of
@@ -79,6 +79,9 @@ function parseArgs(argv) {
                 break;
             case '--runid':
                 args.runid = argv[++i];
+                break;
+            case '--chromePath':
+                args.chromePath = argv[++i];
                 break;
             default:
                 console.error(`Unknown argument: ${arg}`);
@@ -765,6 +768,7 @@ function runPlaywright(dir, jsonReportPath, junitOutputPath, opts) {
             // re-run every prior step from scratch). Retries always stay 0 here.
             ...(opts.resilient ? { INSIGHTEST_RESILIENT: '1' } : {}),
             ...(opts.navTimeout ? { INSIGHTEST_NAV_TIMEOUT_MS: String(opts.navTimeout) } : {}),
+            ...(opts.chromePath ? { PW_CHROME_PATH: String(opts.chromePath) } : {}),
             // liveReporter.js publishes each test's result as soon as it ends, using these.
             INSIGHTEST_RUN_KEY: opts.runKey || '',
             INSIGHTEST_REPORT_URL: opts.apiUrl,
@@ -876,6 +880,7 @@ async function main() {
         betweenActionMs: args.betweenActionMs,
         resilient: args.resilient,
         navTimeout: args.navTimeout,
+        chromePath: args.chromePath || process.env.INSIGHTEST_CHROME_PATH,
     });
     // A spawn failure (bad shell/path) or Playwright crashing before it can write the JSON
     // report (missing browsers, a config/syntax error in the generated spec, etc.) must not

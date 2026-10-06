@@ -23,6 +23,8 @@ export interface HealChange {
   option?: string;
   /** Fixed timeout in ms (steps whose element only shows up late). */
   timeoutMs?: number;
+  /** A whole new step to splice in, right after `afterStepKey` (null = at the very start). */
+  insert?: { afterStepKey: string | null; step: EditableStep };
 }
 
 export type HealSource = 'deterministic' | 'ai';
@@ -36,7 +38,7 @@ export interface HealProposal {
   /** 1-based position of the step in its test, for display. */
   stepNumber: number;
   actionLabel: string;
-  kind: 'selector' | 'timing' | 'value';
+  kind: 'selector' | 'timing' | 'value' | 'missing-step';
   source: HealSource;
   strategy: string;
   /** 0..1 */
@@ -220,17 +222,26 @@ export function applyChange(step: EditableStep, change: HealChange): EditableSte
   return next;
 }
 
-/** A copy of `parsed` with every given proposal (that targets one of its steps) applied. */
+/** A copy of `parsed` with every given proposal (that targets one of its steps) applied: in-place changes first,
+ * then new steps spliced in after their anchor (or at the start), in the order the proposals were given. */
 export function applyProposals(parsed: ParsedBuilderTest, proposals: readonly HealProposal[]): ParsedBuilderTest {
+  const modifying = proposals.filter((p) => !p.change.insert);
+  const inserting = proposals.filter((p) => p.change.insert);
+
   const byStep = new Map<string, HealProposal[]>();
-  for (const p of proposals) byStep.set(p.stepKey, [...(byStep.get(p.stepKey) ?? []), p]);
-  return {
-    ...parsed,
-    steps: parsed.steps.map((s) => {
-      const list = byStep.get(s.key);
-      return list ? list.reduce((step, p) => applyChange(step, p.change), s) : s;
-    }),
-  };
+  for (const p of modifying) byStep.set(p.stepKey, [...(byStep.get(p.stepKey) ?? []), p]);
+  let steps = parsed.steps.map((s) => {
+    const list = byStep.get(s.key);
+    return list ? list.reduce((step, p) => applyChange(step, p.change), s) : s;
+  });
+
+  for (const p of inserting) {
+    const { afterStepKey, step } = p.change.insert!;
+    const idx = afterStepKey ? steps.findIndex((s) => s.key === afterStepKey) : -1;
+    steps = [...steps.slice(0, idx + 1), step, ...steps.slice(idx + 1)];
+  }
+
+  return { ...parsed, steps };
 }
 
 /** Clones the drafts and applies the proposals to the test each one belongs to. */
