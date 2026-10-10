@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, FolderGit2, FolderOpen, Globe, Pencil, Plus, Trash2, Users } from 'lucide-react';
+import { ArrowLeft, Database, FolderGit2, FolderOpen, Globe, Pencil, Plus, Trash2, Users } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import { Brand } from '../components/Brand';
 import { InvitationBell } from '../components/InvitationBell';
@@ -52,11 +52,15 @@ export function ProjectsScreen({
   const [newBaseUrl, setNewBaseUrl] = useState('');
   const [newRepoPath, setNewRepoPath] = useState('');
   const [newSelectorPriority, setNewSelectorPriority] = useState<SelectorKind[]>(DEFAULT_SELECTOR_PRIORITY);
+  const [newDbConnectionString, setNewDbConnectionString] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
   const [editingBaseUrl, setEditingBaseUrl] = useState('');
   const [editingRepoPath, setEditingRepoPath] = useState('');
   const [editingSelectorPriority, setEditingSelectorPriority] = useState<SelectorKind[]>(DEFAULT_SELECTOR_PRIORITY);
+  // Write-only: starts empty even when a secret is already configured (has_db_connection), so leaving
+  // it untouched sends nothing and the stored secret is left exactly as it was.
+  const [editingDbConnectionString, setEditingDbConnectionString] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -85,11 +89,13 @@ export function ProjectsScreen({
         base_url: newBaseUrl.trim() || null,
         repo_path: newRepoPath.trim() || null,
         selector_priority: newSelectorPriority,
+        db_connection_string: newDbConnectionString.trim() || null,
       });
       setNewSelectorPriority(DEFAULT_SELECTOR_PRIORITY);
       setNewName('');
       setNewBaseUrl('');
       setNewRepoPath('');
+      setNewDbConnectionString('');
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t('Unknown error'));
@@ -103,6 +109,7 @@ export function ProjectsScreen({
     setEditingBaseUrl(project.base_url ?? '');
     setEditingRepoPath(project.repo_path ?? '');
     setEditingSelectorPriority(parseSelectorPriority(project.selector_priority));
+    setEditingDbConnectionString('');
   }
 
   async function saveEdit(projectId: number): Promise<void> {
@@ -113,6 +120,9 @@ export function ProjectsScreen({
         base_url: editingBaseUrl.trim() || null,
         repo_path: editingRepoPath.trim() || null,
         selector_priority: editingSelectorPriority,
+        // Omitted (undefined) when left blank, so an already-configured secret is left unchanged;
+        // the backend only resets it when the field is explicitly present in the request body.
+        ...(editingDbConnectionString.trim() ? { db_connection_string: editingDbConnectionString.trim() } : {}),
       });
       setEditingId(null);
       await load();
@@ -171,6 +181,13 @@ export function ProjectsScreen({
                 placeholder={t('Local path of the git repo — used to delegate repairs to an AI agent')}
               />
               <SelectorPriorityEditor value={editingSelectorPriority} onChange={setEditingSelectorPriority} />
+              <input
+                type="password"
+                value={editingDbConnectionString}
+                onChange={(e) => setEditingDbConnectionString(e.target.value)}
+                placeholder={project.has_db_connection ? t('DB connection string — •••••••• (leave blank to keep it)') : t('DB connection string (optional) — e.g. postgres://user:pass@host/db — used by the "DB" test action')}
+                className="w-full"
+              />
               <div className="flex gap-2">
                 <button onClick={() => saveEdit(project.id)}>{t('Save')}</button>
                 <button className="secondary" onClick={() => setEditingId(null)}>
@@ -190,6 +207,11 @@ export function ProjectsScreen({
                 {project.repo_path && (
                   <div className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-ink-muted">
                     <FolderGit2 size={12} className="flex-shrink-0" /> <span className="truncate">{project.repo_path}</span>
+                  </div>
+                )}
+                {project.has_db_connection && (
+                  <div className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-ink-muted">
+                    <Database size={12} className="flex-shrink-0" /> <span className="truncate">{t('DB connection configured')}</span>
                   </div>
                 )}
               </div>
@@ -229,6 +251,13 @@ export function ProjectsScreen({
             placeholder={t('Local path of the git repo (optional) — used to delegate repairs to an AI agent')}
           />
           <SelectorPriorityEditor value={newSelectorPriority} onChange={setNewSelectorPriority} />
+          <input
+            type="password"
+            placeholder={t('DB connection string (optional) — e.g. postgres://user:pass@host/db — used by the "DB" test action')}
+            value={newDbConnectionString}
+            onChange={(e) => setNewDbConnectionString(e.target.value)}
+            className="w-full"
+          />
           <button type="submit" disabled={!newName.trim()} className="self-start">
             <Plus size={15} /> {t('Create')}
           </button>

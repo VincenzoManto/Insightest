@@ -19,7 +19,17 @@ export interface Project {
   repo_path: string | null;
   /** JSON array of selector kinds in the order the runner tries them; null = default (xpath, generalSelector, text, id). */
   selector_priority: string | null;
+  /** Whether a DB connection string is configured for the "DB" test action; the secret itself is never
+   * returned here -- only GET /projects/:projectId/db-secret decrypts it, right before a run that needs it. */
+  has_db_connection?: boolean;
   created_at: string;
+}
+
+/** Write-only payload for creating/updating a project: the plaintext connection string is only ever sent,
+ * never received back (mirrors `Project.has_db_connection`, the read-only indicator). Omit the field to
+ * leave the stored secret unchanged; send '' to clear it. */
+export interface ProjectWriteFields {
+  db_connection_string?: string;
 }
 
 export interface ApiKey {

@@ -7,7 +7,7 @@ import { RunProgressRing } from '../components/RunProgressRing';
 import { HealPanel } from '../components/HealPanel';
 import { countLoggedActions, countStartedActions, runningPercent } from '../runProgress';
 import { parseSelectorPriority } from '../components/SelectorPriorityEditor';
-import { ACTION_LABEL, META_METHODS, hasSelector, newStep, parseBuilderTest, serializeBuilderTest, stepDetail, stepPrimaryLabel, type EditableStep, type ParsedBuilderTest, type StepAction } from '../stepModel';
+import { ACTION_LABEL, META_METHODS, builderTestFromRecordedSteps, hasSelector, newStep, parseBuilderTest, serializeBuilderTest, stepDetail, stepPrimaryLabel, type EditableStep, type ParsedBuilderTest, type StepAction } from '../stepModel';
 import type { Folder, Project, TestDetail, TestRun, TestRunDetail, TestSummary } from '../types';
 import type { AgentName, HealResult, ResilientStepMeta } from '../electron-bridge';
 import { AiTestAssistant } from './AiTestAssistant';
@@ -123,6 +123,7 @@ const BUILDER_ICON: Record<StepAction, ParsedStep['action']> = {
   keydown: 'press',
   wait: 'wait',
   resize: 'other',
+  DB: 'other',
   raw: 'other',
 };
 
@@ -458,7 +459,11 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
       }
       // Prerequisites run first, in the same browser: their actions count toward the ring too.
       setRunTotal(countLoggedActions(test.playwright_code) + dependencyCodes.reduce((sum, c) => sum + countLoggedActions(c), 0));
-      const result = await window.insightest.playwright.run(test.playwright_code, { headed, betweenActionMs, selectorPriority }, dependencyCodes, parseStepsJson(test.steps_json), dependencySteps);
+      // The connection string is decrypted server-side and fetched only when a "DB" step is actually
+      // present, so the secret never travels over the wire for runs that don't need it.
+      const usesDb = project?.has_db_connection && [test.playwright_code, ...dependencyCodes].some((c) => c.includes('pw.DB('));
+      const dbConnectionString = usesDb ? (await api.get<{ connection_string: string | null }>(`/projects/${project!.id}/db-secret`)).connection_string : null;
+      const result = await window.insightest.playwright.run(test.playwright_code, { headed, betweenActionMs, selectorPriority, dbConnectionString }, dependencyCodes, parseStepsJson(test.steps_json), dependencySteps);
       setLastLog(result.log);
       setRunOutcome(result.status === 'passed' ? 'passed' : 'failed');
       await api.post(`/tests/${testId}/runs`, {
@@ -525,9 +530,15 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
     setError(null);
     setRecording(true);
     try {
-      const recorded = await window.insightest.playwright.record(recordUrl);
-      if (recorded) {
-        setEditCode(recorded);
+      const recordedSteps = await window.insightest.playwright.recordBuilderSteps(recordUrl);
+      if (recordedSteps && recordedSteps.length) {
+        // Same conversion as a brand-new recording (see NewTestForm.record()): pw.click/pw.select2/...
+        // with classified selectors, so the result is immediately editable in the Step Editor.
+        const parsed = builderTestFromRecordedSteps(recordedSteps, editName || test?.name || t('describe the test here'));
+        const { code: builderCode } = serializeBuilderTest(parsed, selectorPriority);
+        setEditCode(builderCode);
+        setStepsDraft(parsed);
+        setStepsDirty(true);
       } else {
         setError(t('No actions recorded (browser closed without interacting)'));
       }

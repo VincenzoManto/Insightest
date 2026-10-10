@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, ArrowRight, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Loader2, RotateCcw, Save, ShieldCheck, Wand2, X, XCircle } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Loader2, MessageCircleQuestion, RotateCcw, Save, ShieldCheck, Wand2, X, XCircle } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import type { Project, TestDetail, TestSummary } from '../types';
 import { parseSelectorPriority } from './SelectorPriorityEditor';
@@ -270,6 +270,7 @@ export function HealPanel({
   const verifiedAll = verification && !verification.running && !verification.outdated && Object.values(verification.results).length > 0 && Object.values(verification.results).every((r) => r.ok);
   const verifiedSome = verification && !verification.running && !verification.outdated && Object.values(verification.results).some((r) => !r.ok);
   const stillBroken = stateRef.current.unresolved;
+  const questions = stateRef.current.questions;
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-primary/45 p-4 backdrop-blur-[2px]">
@@ -461,6 +462,30 @@ export function HealPanel({
                     ))}
                   </ul>
                   <div className="mt-1.5 text-xs text-ink-muted">{t('Fix these by hand in the step editor: the page no longer has anything that resembles them.')}</div>
+                </div>
+              )}
+
+              {questions.length > 0 && (
+                <div className="rounded-xl border border-accent/40 bg-accent/5 px-3 py-2.5 text-[13px]">
+                  <div className="flex items-center gap-2 font-semibold text-ink-primary">
+                    <MessageCircleQuestion size={15} className="text-accent" /> {t('Claude has {n} question(s) before it can fix the rest', { n: questions.length })}
+                  </div>
+                  <p className="mt-1 text-xs text-ink-muted">
+                    {t("It chose not to guess a selector it couldn't verify. Answer by editing the step yourself (or telling it what changed) and run again.")}
+                  </p>
+                  <ul className="mt-2 flex flex-col gap-3">
+                    {questions.map((q, idx) => (
+                      <li key={`${q.testId}:${q.stepKey}:${idx}`} className="flex gap-3 rounded-lg bg-surface px-2.5 py-2">
+                        {q.screenshot && <img src={q.screenshot} alt="" className="h-20 w-32 flex-shrink-0 rounded border border-gridline object-cover object-top" />}
+                        <div className="min-w-0 flex-1 text-xs text-ink-secondary">
+                          <div className="font-semibold text-ink-primary">
+                            {q.testName} — {t('Step')} {q.stepNumber} ({t(q.actionLabel)})
+                          </div>
+                          <div className="mt-0.5">{q.question}</div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </>

@@ -11,23 +11,78 @@
 // (local runs); keep all three in sync.
 'use strict';
 
+const { runQuery, diffRows } = require('./dbClient');
+
 const DEFAULT_PRIORITY = ['xpath', 'generalSelector', 'text', 'id'];
 const DEFAULT_ACTION_TIMEOUTS_MS = [8000, 15000, 20000];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const firstLine = (e) => (e && e.message ? String(e.message).split('\n')[0] : String(e));
 
+// Framework-generated ids (select2-xxxx-container, ng-…, mat-…, a React :rN, or any run of 3+ digits) are a NEW
+// random value on every page load/widget instantiation: a selector built on one is guaranteed to be stale the
+// moment it is replayed in a different run, yet it still looks like a perfectly fine recorded candidate. Trying
+// it anyway just burns a full escalating-timeout attempt for nothing, delaying the fallbacks that could actually
+// find the element (recorded alternative, live similarity match, heal probing).
+const DYNAMIC_ID_RE = /(select2|mat-|ng-|cdk-|ui-|react|:r\d)|\d{3,}/i;
+function isDynamicIdSelector(sel) {
+  const m = /^#([\w-]+)/.exec(String(sel).trim());
+  return !!m && DYNAMIC_ID_RE.test(m[1]);
+}
+
 const dialogHandled = new WeakSet();
-const networkLogged = new WeakSet();
+
+/** Watches `page` for failed HTTP responses (4xx/5xx) without failing the test, collecting them on
+ * the page itself (`page.__insightestApiErrors`) so they survive across whoever created the page
+ * (PlaywrightBuilder or a plain Playwright test) -- a plain property on the shared `page` object,
+ * not a module-local WeakSet, so this works even when called from a different copy of this file
+ * (ci-runner/ vs backend/public/ci-runner/ vs desktop/electron/) in the same process. Guarded so a
+ * test that also builds a PlaywrightBuilder doesn't get the listener attached twice. */
+function trackApiErrors(page) {
+  if (page.__insightestNetworkTracked) return;
+  page.__insightestNetworkTracked = true;
+  page.__insightestApiErrors = [];
+  page.__insightestApiErrorReads = [];
+  page.on('response', (r) => {
+    if (r.status() < 400) return;
+    console.warn(`[insightest] HTTP ${r.status()} ${r.request().method()} ${r.url()}`);
+    // Reading the body is async and must finish before reportApiErrors() runs (afterEach, right
+    // after the test ends) or the error is silently dropped -- tracked here so it can be awaited.
+    const read = r
+      .text()
+      .then((body) => {
+        page.__insightestApiErrors.push({ status: r.status(), url: r.url(), body: String(body || '').replace(/\s+/g, ' ').trim().slice(0, 2000) });
+      })
+      .catch(() => {
+        page.__insightestApiErrors.push({ status: r.status(), url: r.url(), body: '' });
+      });
+    page.__insightestApiErrorReads.push(read);
+  });
+}
+
+/** Prints one line per failed HTTP response seen on `page` since it was created, in the
+ * `{nome test} > {status code} > {url} > {body}` format the pipeline/app scan for and save --
+ * meant to be called once a test (or the whole run) ends, so API errors are surfaced even when
+ * the test itself passed. Returns the list (also useful for an end-of-run recap). */
+async function reportApiErrors(page, testName) {
+  await Promise.all(page.__insightestApiErrorReads || []).catch(() => {});
+  const errors = page.__insightestApiErrors || [];
+  for (const e of errors) {
+    console.log(`[insightest-api-error] ${testName} > ${e.status} > ${e.url} > ${e.body}`);
+  }
+  return errors;
+}
 
 class PlaywrightBuilder {
   /**
    * @param page     Playwright Page
-   * @param opts     { priority?: string[], variables?: Record<string,string>, timeouts?: number[], navTimeouts?: number[] }
+   * @param opts     { priority?: string[], variables?: Record<string,string>, timeouts?: number[], navTimeouts?: number[], dbConnectionString?: string }
    */
   constructor(page, opts = {}) {
     this.page = page;
     this.variables = opts.variables || {};
+    this.dbConnectionString = opts.dbConnectionString || null;
+    this._dbSnapshots = {};
     this.priority = Array.isArray(opts.priority) && opts.priority.length ? opts.priority : DEFAULT_PRIORITY;
     // Heal mode: a step that cannot be performed is searched for on the live page instead of failing the run.
     this.healMode = opts.heal !== undefined ? !!opts.heal : process.env.INSIGHTEST_HEAL === '1';
@@ -49,12 +104,7 @@ class PlaywrightBuilder {
       });
     }
     // Report failed HTTP responses without failing the test.
-    if (!networkLogged.has(page)) {
-      networkLogged.add(page);
-      page.on('response', (r) => {
-        if (r.status() >= 400) console.warn(`[insightest] HTTP ${r.status()} ${r.request().method()} ${r.url()}`);
-      });
-    }
+    trackApiErrors(page);
   }
 
   // ---------------------------------------------------------------- plumbing
@@ -88,14 +138,14 @@ class PlaywrightBuilder {
       for (const key of this.priority) {
         if (key === 'text') {
           if (byKey.text) out.push({ text: byKey.text });
-        } else if (byKey[key]) {
+        } else if (byKey[key] && !isDynamicIdSelector(byKey[key])) {
           out.push({ sel: String(byKey[key]).trim() });
         }
       }
     }
     if (!out.length && primary) out.push({ sel: primary });
     for (const s of (meta && meta.secondarySelectors) || []) {
-      if (s && !s.startsWith('select2text:')) out.push({ sel: String(s).trim() });
+      if (s && !s.startsWith('select2text:') && !isDynamicIdSelector(s)) out.push({ sel: String(s).trim() });
     }
     const seen = new Set();
     return out.filter((c) => {
@@ -141,6 +191,18 @@ class PlaywrightBuilder {
       }
     }
     this.page.setDefaultTimeout(timeouts[timeouts.length - 1]);
+    // The selector may well be right and the element real, but not "actionable" by Playwright's stricter
+    // definition (covered by a sticky header/overlay, mid-animation, or destabilized by the auto-scroll that
+    // precedes the action): force the action through, bypassing those checks, before concluding the selector
+    // itself is stale. Always reported (never silently treated as the normal path) since forcing an action can
+    // just as easily hit an element a real user could never actually interact with.
+    try {
+      await perform(this._locator(main), { force: true, noScroll: true });
+      this._emitHeal({ ...this._ref(meta), action: label, failed: mainLabel, failedAll: [mainLabel], kind: 'force-interaction', strategy: 'force', confidence: 0.6, evidence: 'the element is only reachable by bypassing Playwright\'s actionability checks (force, no auto-scroll)' });
+      return true;
+    } catch (e) {
+      lastError = e;
+    }
     const failedLabels = [mainLabel];
     for (const cand of cands.slice(1)) {
       console.log(`[insightest] Fallback 3/3 (selettore secondario): ${label} ${this._label(cand)}`);
@@ -382,19 +444,36 @@ class PlaywrightBuilder {
           for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) d[i][j] = a[i - 1] === b[j - 1] ? d[i - 1][j - 1] : 1 + Math.min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1]);
           return 1 - d[m][n] / Math.max(m, n);
         };
+        // A selector relative only to the element's immediate parent (e.g. `button:nth-of-type(1)`) is not unique
+        // across the WHOLE page: page.locator() matches it anywhere, so `.first()` can resolve to a completely
+        // different element (seen in practice: a modal's "Ok" button healed into the page's navbar toggler, which
+        // also happens to be its parent's first <button>). Walk up to an id'd ancestor (or <html>) instead, so the
+        // path is unique on the page.
+        const uniquePath = (node) => {
+          const parts = [];
+          while (node && node.nodeType === 1 && node.tagName.toLowerCase() !== 'html') {
+            if (node.id) {
+              parts.unshift(`#${CSS.escape(node.id)}`);
+              break;
+            }
+            const parent = node.parentElement;
+            if (!parent) {
+              parts.unshift(node.tagName.toLowerCase());
+              break;
+            }
+            const sibs = Array.from(parent.children).filter((s) => s.tagName === node.tagName);
+            parts.unshift(sibs.length > 1 ? `${node.tagName.toLowerCase()}:nth-of-type(${sibs.indexOf(node) + 1})` : node.tagName.toLowerCase());
+            node = parent;
+          }
+          return parts.join(' > ');
+        };
         let best = null;
         for (const el of document.querySelectorAll(tagHint || 'button, a, input, select, textarea, [role], label, [onclick]')) {
           const text = (el.getAttribute('aria-label') || el.textContent || el.getAttribute('placeholder') || el.getAttribute('value') || '').trim();
           if (!text) continue;
           const score = sim(text, textHint);
           if (score > 0.55 && (!best || score > best.score)) {
-            let selector;
-            if (el.id) selector = `#${CSS.escape(el.id)}`;
-            else {
-              const sibs = Array.from(el.parentElement ? el.parentElement.children : []).filter((s) => s.tagName === el.tagName);
-              selector = `${el.tagName.toLowerCase()}:nth-of-type(${sibs.indexOf(el) + 1})`;
-            }
-            best = { selector, score };
+            best = { selector: el.id ? `#${CSS.escape(el.id)}` : uniquePath(el), score };
           }
         }
         return best;
@@ -479,6 +558,32 @@ class PlaywrightBuilder {
     await this.page.evaluate((c) => (0, eval)(c), this.clean(code));
   };
 
+  /** Runs a SQL query against the project's DB connection string. `opts.mode === 'snapshot'` stores
+   * the result rows under `opts.name` for a later diff; `opts.mode === 'diff'` re-runs the query,
+   * compares it against that snapshot by `opts.keyColumn`, and asserts the inserted/updated/deleted
+   * row counts in `opts.expect` ({ inserted?, updated?, deleted? }) match -- throwing (failing the
+   * step) on a mismatch. */
+  DB = async (query, opts = {}) => {
+    const sql = this.clean(query);
+    console.log(`[insightest] DB ${opts.mode === 'diff' ? 'diff' : 'snapshot'} (${opts.name || ''}): ${sql}`);
+    const { rows } = await runQuery(this.dbConnectionString, sql);
+
+    if (opts.mode !== 'diff') {
+      this._dbSnapshots[opts.name] = rows;
+      return;
+    }
+
+    const before = this._dbSnapshots[opts.name] || [];
+    const { inserted, updated, deleted } = diffRows(before, rows, opts.keyColumn);
+    console.log(`[insightest] DB diff (${opts.name || ''}): inserted=${inserted} updated=${updated} deleted=${deleted}`);
+    for (const [key, expected] of Object.entries(opts.expect || {})) {
+      const actual = { inserted, updated, deleted }[key];
+      if (expected !== undefined && expected !== null && actual !== expected) {
+        throw new Error(`DB diff assertion failed for "${opts.name}": expected ${key}=${expected}, got ${actual}`);
+      }
+    }
+  };
+
   awaitText = async (property, selector, text) => {
     text = this.clean(text);
     await this.page.waitForFunction((t) => document.body.innerText.includes(t), text);
@@ -495,36 +600,36 @@ class PlaywrightBuilder {
 
   click = async (selector, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();
-    if (await this._do('Click', this.clean(selector), (l) => l.click(options), meta)) await this._afterAction(causesNavigation);
+    if (await this._do('Click', this.clean(selector), (l, extra) => l.click({ ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
   };
 
   doubleClick = async (selector, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();
-    if (await this._do('Doppio click', this.clean(selector), (l) => l.dblclick(options), meta)) await this._afterAction(causesNavigation);
+    if (await this._do('Doppio click', this.clean(selector), (l, extra) => l.dblclick({ ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
   };
 
   rightClick = async (selector, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();
-    if (await this._do('Click destro', this.clean(selector), (l) => l.click({ ...options, button: 'right' }), meta)) await this._afterAction(causesNavigation);
+    if (await this._do('Click destro', this.clean(selector), (l, extra) => l.click({ ...options, ...extra, button: 'right' }), meta)) await this._afterAction(causesNavigation);
   };
 
   hover = async (selector, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();
-    if (await this._do('Hover', this.clean(selector), (l) => l.hover(options), meta)) await this._afterAction(causesNavigation);
+    if (await this._do('Hover', this.clean(selector), (l, extra) => l.hover({ ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
   };
 
   /** Key-by-key typing (appends), like puppeteer's page.type. */
   type = async (selector, value, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();
     value = String(this.clean(value) ?? '');
-    if (await this._do('Digita', this.clean(selector), (l) => l.pressSequentially(value, options), meta)) await this._afterAction(causesNavigation);
+    if (await this._do('Digita', this.clean(selector), (l, extra) => l.pressSequentially(value, { ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
   };
 
   /** Sets the field's value. If the recorded target is a wrapper (label/div) fills its nearest writable descendant. */
   fill = async (selector, value, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();
     value = String(this.clean(value) ?? '');
-    if (await this._do('Fill', this.clean(selector), (l) => this._smartFill(l, value, options), meta)) await this._afterAction(causesNavigation);
+    if (await this._do('Fill', this.clean(selector), (l, extra) => this._smartFill(l, value, { ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
     return this;
   };
 
@@ -539,14 +644,14 @@ class PlaywrightBuilder {
 
   clearInput = async (selector) => {
     const meta = this._takeMeta();
-    await this._do('Svuota', this.clean(selector), (l) => this._smartFill(l, '', {}), meta);
+    await this._do('Svuota', this.clean(selector), (l, extra) => this._smartFill(l, '', extra || {}), meta);
   };
 
   /** Native <select>: by option value (or label). */
   select = async (selector, option, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();
     option = String(this.clean(option) ?? '');
-    if (await this._do('Seleziona opzione', this.clean(selector), (l) => l.selectOption(option, options), meta)) await this._afterAction(causesNavigation);
+    if (await this._do('Seleziona opzione', this.clean(selector), (l, extra) => l.selectOption(option, { ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
   };
 
   /** selector null/'' => key goes to whatever has focus (page.keyboard). */
@@ -556,7 +661,7 @@ class PlaywrightBuilder {
     if (!selector) {
       await this.page.keyboard.press(key);
     } else {
-      if (!(await this._do('Premi tasto', this.clean(selector), (l) => l.press(key, options), meta))) return;
+      if (!(await this._do('Premi tasto', this.clean(selector), (l, extra) => l.press(key, { ...options, ...extra }), meta))) return;
     }
     await this._afterAction(causesNavigation);
   };
@@ -710,4 +815,4 @@ class PlaywrightBuilder {
   }
 }
 
-module.exports = { PlaywrightBuilder, DEFAULT_PRIORITY };
+module.exports = { PlaywrightBuilder, DEFAULT_PRIORITY, trackApiErrors, reportApiErrors };

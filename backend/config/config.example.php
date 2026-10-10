@@ -14,6 +14,10 @@ return [
     // Used as HMAC key when hashing API keys (separate from JWT secret).
     'api_key_secret' => getenv('APP_API_KEY_SECRET') ?: 'CHANGE_ME_TO_A_DIFFERENT_RANDOM_SECRET',
 
+    // AES-256-GCM key (binary, derived via hash()) used to encrypt projects.db_connection_string.
+    // Generate with: php -r "echo bin2hex(random_bytes(32));"
+    'db_secret_key' => getenv('APP_DB_SECRET_KEY') ?: 'CHANGE_ME_TO_A_RANDOM_64_CHAR_HEX_SECRET',
+
     // Comma-separated list of allowed origins for CORS (desktop app uses a custom
     // scheme / no browser origin, so this mainly matters for a future web UI).
     'cors_allowed_origins' => array_filter(explode(',', getenv('APP_CORS_ORIGINS') ?: '')),

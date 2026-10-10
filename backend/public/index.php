@@ -84,6 +84,7 @@ $router->post('/orgs/{orgId}/projects', [ProjectController::class, 'create'], [$
 $router->get('/projects/shared', [ProjectController::class, 'shared'], [$auth]);
 $router->get('/projects/{projectId}', [ProjectController::class, 'show'], [$auth]);
 $router->get('/projects/{projectId}/members', [ProjectController::class, 'members'], [$auth]);
+$router->get('/projects/{projectId}/db-secret', [ProjectController::class, 'dbSecret'], [$auth]);
 $router->delete('/projects/{projectId}/members/{userId}', [ProjectController::class, 'removeMember'], [$auth]);
 $router->put('/projects/{projectId}', [ProjectController::class, 'update'], [$auth]);
 $router->delete('/projects/{projectId}', [ProjectController::class, 'delete'], [$auth]);

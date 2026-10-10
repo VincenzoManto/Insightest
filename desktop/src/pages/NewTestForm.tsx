@@ -4,6 +4,11 @@ import { useAuth } from '../state/AuthContext';
 import { t } from '../i18n';
 import type { Project, TestSummary } from '../types';
 import { AiTestAssistant } from './AiTestAssistant';
+import { builderTestFromRecordedSteps, serializeBuilderTest } from '../stepModel';
+
+// Mirrors PlaywrightBuilder's DEFAULT_PRIORITY (electron/pwBuilder.js): the default when the
+// project has no selector_priority of its own yet (new tests have no project context here).
+const DEFAULT_SELECTOR_PRIORITY = ['xpath', 'generalSelector', 'text', 'id'];
 
 const template = (): string => `import { test, expect } from '@playwright/test';
 
@@ -49,20 +54,15 @@ export function NewTestForm({
     setError(null);
     setRecording(true);
     try {
-      const recorded = await window.insightest.playwright.record(recordUrl);
-      if (recorded) {
-        setCode(recorded);
-        setSteps(null);
-        // Best-effort: replays the just-recorded actions once (headless) to capture N-1
-        // alternate selectors per step for the resilient-action engine's fallback; a failure
-        // here (app not reachable a second time, etc.) just means the test is saved without
-        // fallback selectors, not that recording itself failed.
-        try {
-          const augmented = await window.insightest.playwright.augment(recorded);
-          setSteps(augmented);
-        } catch {
-          setSteps(null);
-        }
+      const recordedSteps = await window.insightest.playwright.recordBuilderSteps(recordUrl);
+      if (recordedSteps && recordedSteps.length) {
+        // Converts the recorded actions straight into PlaywrightBuilder steps (pw.click/pw.select2/...),
+        // with each one's live-DOM selector candidates already classified -- the same format the Step
+        // Editor and pwBuilder.js engine understand, instead of raw page.locator(...) codegen output.
+        const parsed = builderTestFromRecordedSteps(recordedSteps, name.trim() || t('describe the test here'));
+        const { code: builderCode, steps: builderSteps } = serializeBuilderTest(parsed, DEFAULT_SELECTOR_PRIORITY);
+        setCode(builderCode);
+        setSteps(builderSteps);
       } else {
         setError(t('No actions recorded (browser closed without interacting)'));
       }

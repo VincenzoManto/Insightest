@@ -17,6 +17,7 @@ import {
   Wrench,
   Trash2,
   Lock,
+  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import { t } from '../i18n';
@@ -24,6 +25,7 @@ import type { Folder, Project, ProjectStats, TestDetail, TestSummary } from '../
 import { TestDetailScreen } from './TestDetailScreen';
 import { NewTestForm } from './NewTestForm';
 import { BrowserSetupCard } from '../components/BrowserSetupCard';
+import { TestGenChatPanel } from '../components/TestGenChatPanel';
 
 type StatusFilter = 'all' | 'passed' | 'failed' | 'never';
 type TriggerFilter = 'all' | 'desktop' | 'ci';
@@ -281,6 +283,7 @@ export function TestsScreen({ project, initialTestId = null }: { project: Projec
   // initialTestId: opened straight on a test's detail (e.g. from the CI runs recap).
   const [selectedId, setSelectedId] = useState<number | null>(initialTestId);
   const [creating, setCreating] = useState(false);
+  const [generatingChat, setGeneratingChat] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [triggerFilter, setTriggerFilter] = useState<TriggerFilter>('all');
   const [tagFilter, setTagFilter] = useState<string>('all');
@@ -489,7 +492,7 @@ export function TestsScreen({ project, initialTestId = null }: { project: Projec
   }
 
   const filteredTests = tests.filter((test) => {
-    if (test.folder_id !== currentFolderId) return false;
+    if (currentFolderId !== null && test.folder_id !== currentFolderId) return false;
     if (statusFilter === 'passed' && test.last_status !== 'passed') return false;
     if (statusFilter === 'failed' && test.last_status !== 'failed' && test.last_status !== 'error') return false;
     if (statusFilter === 'never' && test.last_status !== null) return false;
@@ -522,12 +525,25 @@ export function TestsScreen({ project, initialTestId = null }: { project: Projec
           <h1 className="screen-title">{t('Dashboard')}</h1>
           <div className="screen-subtitle truncate">{project.name}</div>
         </div>
-        <button onClick={() => setCreating(true)}>
-          <Plus size={16} /> {t('New test')}
-        </button>
+        <div className="flex gap-2">
+          <button className="secondary" onClick={() => setGeneratingChat(true)}>
+            <Sparkles size={16} /> {t('Generate with Claude')}
+          </button>
+          <button onClick={() => setCreating(true)}>
+            <Plus size={16} /> {t('New test')}
+          </button>
+        </div>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+
+      {generatingChat && (
+        <TestGenChatPanel
+          project={project}
+          onClose={() => setGeneratingChat(false)}
+          onCreated={() => void load()}
+        />
+      )}
 
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <StatTile
@@ -622,7 +638,7 @@ export function TestsScreen({ project, initialTestId = null }: { project: Projec
             }`}
           >
             <Home size={13} /> {t('All tests')}
-            <span className="ml-auto text-ink-muted">{tests.filter((test) => test.folder_id === null).length}</span>
+            <span className="ml-auto text-ink-muted">{tests.length}</span>
           </button>
 
           {rootFolders.map((folder) => (

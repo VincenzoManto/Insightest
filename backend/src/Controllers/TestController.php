@@ -3,6 +3,7 @@
 namespace App\Controllers;
 
 use App\Authz;
+use App\Crypto\SecretBox;
 use App\Database;
 use App\HttpException;
 use App\Request;
@@ -232,6 +233,7 @@ final class TestController
                 WHERE t.depends_on_test_id IS NOT NULL
              )
              SELECT t.id, t.name, t.playwright_code, t.steps_json, t.depends_on_test_id, p.selector_priority,
+                p.db_connection_string,
                 (SELECT status FROM test_runs r WHERE r.test_id = t.id AND r.triggered_by = \'ci\' ORDER BY r.created_at DESC LIMIT 1) AS last_ci_status
              FROM tests t
              JOIN projects p ON p.id = t.project_id
@@ -245,6 +247,8 @@ final class TestController
             // against depends_on_test_id, so both must be real integers.
             $test['id'] = (int) $test['id'];
             $test['depends_on_test_id'] = $test['depends_on_test_id'] !== null ? (int) $test['depends_on_test_id'] : null;
+            // Decrypted only in this API-key-authenticated response, handed directly to the CI runner.
+            $test['db_connection_string'] = SecretBox::decrypt($test['db_connection_string']);
         }
         Response::json(['tests' => $tests]);
     }

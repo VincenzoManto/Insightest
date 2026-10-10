@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS projects (
     -- JSON array: which recorded selector kinds the runner tries, in order (xpath, generalSelector, text, id,
     -- testIdSelector, attrSelector). NULL = default order (xpath, generalSelector, text, id).
     selector_priority TEXT,
+    -- Encrypted (AES-256-GCM via App\Crypto\SecretBox) connection string to the app's database,
+    -- used by the "DB" test action to run queries/verify records. NULL = no DB configured.
+    -- Decrypted only when a test is handed to a runner for execution; never returned as plaintext
+    -- by the normal project list/show endpoints.
+    db_connection_string TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 

@@ -421,7 +421,7 @@ function writeCombinedSpec(tests, dir) {
                 console.error(`[insightest] Skipping test "${t.name}" (id ${t.id}): invalid recorded code -- ${skipReason}`);
                 testBody = `    test.skip(true, ${JSON.stringify('Invalid recorded code: ' + skipReason)});`;
             }
-            const pwInit = builderTest ? `    const pw = new PlaywrightBuilder(page, { priority: ${JSON.stringify(parseSelectorPriority(t.selector_priority))} });\n` : '';
+            const pwInit = builderTest ? `    const pw = new PlaywrightBuilder(page, { priority: ${JSON.stringify(parseSelectorPriority(t.selector_priority))}, dbConnectionString: ${JSON.stringify(t.db_connection_string || null)} });\n` : '';
             return `  test(\`${title}\`, async () => {\n    const page = __sharedPage;\n${pwInit}${testBody}\n  });`;
         })
         .join('\n\n');
@@ -429,7 +429,7 @@ function writeCombinedSpec(tests, dir) {
 
     const source = `import { test, expect } from '@playwright/test';
 const fs = require('fs');
-const { PlaywrightBuilder } = require(${JSON.stringify(path.join(__dirname, 'pwBuilder.js'))});
+const { PlaywrightBuilder, trackApiErrors, reportApiErrors } = require(${JSON.stringify(path.join(__dirname, 'pwBuilder.js'))});
 
 ${preambles.join('\n\n')}
 
@@ -692,19 +692,29 @@ test.describe('Insightest CI suite', () => {
       __sharedPage = await __sharedContext.newPage();
     }
     __insightestEnsureSmartFill(__sharedPage);
+    // Watches this test's page for 4xx/5xx API responses -- reported at test end below, whether
+    // the test passed or failed, since a passing test can still be hiding broken backend calls.
+    trackApiErrors(__sharedPage);
     if (!process.env.INSIGHTEST_RESILIENT) return;
     __sharedPage.setDefaultTimeout(RESILIENT_RETRY_TIMEOUTS_MS[0]);
     __sharedPage.setDefaultNavigationTimeout(RESILIENT_RETRY_TIMEOUTS_MS[0]);
-    // Generous ceiling so a test that needs all 3 escalating attempts on several actions never
-    // hits Playwright's own per-test timeout mid-attempt (which would report it as a *timeout*
-    // instead of a plain failure, and force-close the shared page for whatever runs next).
-    testInfo.setTimeout(RESILIENT_RETRY_TIMEOUTS_MS.reduce((a, b) => a + b, 0) * 6);
+    // A fixed ceiling here was wrong: it was sized for a handful of escalating retries, but a long
+    // recorded test (many steps, several of them needing all 3 attempts) can legitimately run past
+    // it -- which Playwright then reports as a *timeout* mid-action (closing the shared page for
+    // whatever runs next) instead of a plain step failure. Resilient mode exists precisely to let a
+    // test take as long as it needs to retry/heal, so it gets NO test-level timeout at all; only the
+    // per-action timeouts above (and the global --timeout, if passed) still bound anything.
+    testInfo.setTimeout(0);
   });
 
   // Persists cookies/localStorage after every test (pass or fail) so the NEXT worker --
   // which Playwright always spins up fresh after any failure -- restores this exact session
   // instead of starting logged out.
-  test.afterEach(async () => {
+  test.afterEach(async ({}, testInfo) => {
+    // Printed as \`[insightest-api-error] {nome test} > {status} > {url} > {body}\`, one line per
+    // failed API call seen while this test ran -- picked up from the test's own stdout (below, and
+    // in the live/offline reporters) so broken backend calls surface even when the test itself passed.
+    await reportApiErrors(__sharedPage, testInfo.title);
     await __sharedContext.storageState({ path: STORAGE_STATE_PATH }).catch(() => {});
     if (!__sharedPage.isClosed()) await __sharedPage.close().catch(() => {});
   });
@@ -923,6 +933,10 @@ async function main() {
             console.error('[insightest] Saved the generated suite for debugging: ' + keep);
         } catch {}
     }
+    // Lines emitted by reportApiErrors() in the generated suite (pwBuilder.js), one per failed
+    // (4xx/5xx) API call seen while a test ran -- collected here even for PASSED tests, since the
+    // whole point is to surface backend errors a green test would otherwise hide.
+    const apiErrorLines = [];
     for (const spec of specs) {
         const testId = testIdFromTitle(spec.title);
         if (!testId) continue;
@@ -934,6 +948,11 @@ async function main() {
         const log = [result?.stdout?.map((c) => c.text).join(''), result?.error?.message]
             .filter(Boolean)
             .join('\n');
+
+        for (const line of log.split('\n')) {
+            const m = /^\[insightest-api-error\] (.+)$/.exec(line.trim());
+            if (m) apiErrorLines.push(m[1]);
+        }
 
         if (status !== 'passed') anyFailed = true;
         else passedCount++;
@@ -961,6 +980,21 @@ async function main() {
     const percent = total ? Math.round((passedCount / total) * 100) : 0;
     const recapColor = passedCount === total ? '\x1b[32m' : passedCount === 0 ? '\x1b[31m' : '\x1b[33m';
     console.log(`\n[insightest] Recap: ${recapColor}${passedCount}/${total} tests passed (${percent}%)\x1b[0m`);
+
+    // 4xx/5xx API errors seen across the whole run, even inside PASSED tests -- printed here (so
+    // the pipeline log always shows them) and saved next to the JUnit report (so they survive as a
+    // CI artifact too), one `{nome test} > {status code} > {url} > {body}` line per error.
+    if (apiErrorLines.length) {
+        console.log(`\n[insightest] ${apiErrorLines.length} API error(s) (4xx/5xx) detected during this run:`);
+        for (const line of apiErrorLines) console.log(`[insightest-api-error] ${line}`);
+        const apiErrorsPath = path.join(path.dirname(junitOutputPath), 'api-errors.log');
+        try {
+            fs.writeFileSync(apiErrorsPath, apiErrorLines.join('\n') + '\n', 'utf8');
+            console.log(`[insightest] API errors saved to ${apiErrorsPath}`);
+        } catch (e) {
+            console.error('[insightest] Failed to save API errors file:', e.message);
+        }
+    }
 
     // --resilient: don't fail the pipeline step over failed tests -- PublishTestResults@2
     // (with failTaskOnFailedTests: false) is meant to be the source of truth for build health.

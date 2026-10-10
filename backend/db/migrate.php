@@ -27,6 +27,7 @@ foreach ([
     ['projects', 'base_url', 'TEXT'],
     ['projects', 'repo_path', 'TEXT'],
     ['projects', 'selector_priority', 'TEXT'],
+    ['projects', 'db_connection_string', 'TEXT'],
     ['test_runs', 'run_key', 'TEXT'],
 ] as [$table, $column, $definition]) {
     $existing = array_column($pdo->query('PRAGMA table_info(' . $table . ')')->fetchAll(), 'name');

@@ -228,19 +228,44 @@ export function cancelAiTestRequest(): boolean {
   return true;
 }
 
+/** Claude always gets a real Playwright browser via an app-provided MCP server, injected via `--mcp-config`
+ * (a file, since inline JSON doesn't survive shell quoting on Windows) -- works whether or not the user
+ * registered a Playwright MCP themselves. Caller deletes the file once the child process has exited.
+ * `outputDir`, when given, is where the MCP server's own screenshot tool saves images (--output-dir): the only
+ * way this process can later pick up a screenshot Claude took, since it never sees the tool's raw result. */
+function writePlaywrightMcpConfig(outputDir?: string): string {
+  const mcpConfigPath = path.join(os.tmpdir(), `insightest-ai-mcp-${process.pid}-${Date.now()}.json`);
+  const args = ['-y', '@playwright/mcp@latest', ...(outputDir ? ['--output-dir', outputDir] : [])];
+  fs.writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { 'playwright-ai': { command: 'npx', args } } }), 'utf8');
+  return mcpConfigPath;
+}
+
+const IMAGE_MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+
+/** Reads a screenshot Claude saved (by filename, inside the MCP server's --output-dir) and turns it into a
+ * data: URI the renderer can show directly in an <img>, with no file path to resolve on its side. Claude can get
+ * the filename slightly wrong (extension, stray path); this tries a couple of forgiving variants before giving up. */
+function screenshotDataUri(dir: string, filename: string): string | null {
+  const base = path.basename(filename.trim());
+  const candidates = [base, ...(/\.\w+$/.test(base) ? [] : ['.png', '.jpeg', '.jpg'].map((ext) => base + ext))];
+  for (const name of candidates) {
+    const full = path.join(dir, name);
+    try {
+      const data = fs.readFileSync(full);
+      const mime = IMAGE_MIME[path.extname(name).toLowerCase()] ?? 'image/png';
+      return `data:${mime};base64,${data.toString('base64')}`;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return null;
+}
+
 /** Runs Claude Code in print mode (prompt on stdin, streamed JSON events) to write or fix a
  * test and returns the proposed code without touching the repo or the stored test. */
 export function runAiTestRequest(req: AiTestRequest, onLine?: (line: string) => void): Promise<AiTestResult> {
   if (currentAiChild) return Promise.reject(new Error(m('A Claude request is already in progress')));
-  // Claude always gets a Playwright browser: an app-provided MCP server is injected via
-  // --mcp-config (a file, since inline JSON doesn't survive shell quoting on Windows), so this
-  // works whether or not the user registered a Playwright MCP themselves.
-  const mcpConfigPath = path.join(os.tmpdir(), `insightest-ai-mcp-${process.pid}.json`);
-  fs.writeFileSync(
-    mcpConfigPath,
-    JSON.stringify({ mcpServers: { 'playwright-ai': { command: 'npx', args: ['-y', '@playwright/mcp@latest'] } } }),
-    'utf8'
-  );
+  const mcpConfigPath = writePlaywrightMcpConfig();
   const allowed = [
     'Read',
     'Grep',
@@ -320,6 +345,213 @@ export function runAiTestRequest(req: AiTestRequest, onLine?: (line: string) => 
   });
 }
 
+/* ------------------------------------------------------------------ AI chat (plan, ask, then write) */
+
+export interface AiChatTurn {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+export interface AiChatRequest {
+  /** Prior turns of this conversation (oldest first), not including `instruction`. */
+  history: AiChatTurn[];
+  /** The user's latest message. */
+  instruction: string;
+  baseUrl?: string | null;
+  repoPath?: string | null;
+  projectId?: number | null;
+}
+
+export interface AiChatQuestion {
+  text: string;
+  /** data: URI of a screenshot Claude took to illustrate the question, if any. */
+  screenshot?: string | null;
+}
+
+export interface AiChatResult {
+  /** `question`: Claude needs clarification before it can plan or write the test.
+   *  `plan`: Claude proposes a plan and is waiting for confirmation (or changes) before writing code.
+   *  `code`: Claude is done and the test is ready. */
+  status: 'question' | 'plan' | 'code';
+  message?: string;
+  questions: AiChatQuestion[];
+  plan: string[];
+  /** Short descriptive name for the test, set together with `code`. */
+  name: string | null;
+  code: string | null;
+  dependsOn: string | null;
+  log: string;
+  exitCode: number | null;
+  cancelled: boolean;
+}
+
+function buildAiChatPrompt(req: AiChatRequest): string {
+  const lines: string[] = [
+    "Stai aiutando l'utente a scrivere uno o più test end-to-end Playwright per un'applicazione web, in una conversazione a più turni. " +
+      "L'utente può chiederti anche molti test diversi nella stessa conversazione (es. \"adesso fammi anche il test del logout\"): trattalo come una nuova richiesta " +
+      'e ripeti lo stesso processo (chiarimento → piano → codice) da capo per quel test, tenendo conto di quanto già creato nella conversazione.',
+  ];
+  if (req.repoPath) lines.push(`Il codice sorgente dell'applicazione testata è nella tua cartella di lavoro corrente (${req.repoPath}): leggilo per capire pagine, route e selettori reali.`);
+  if (req.baseUrl) lines.push(`URL base dell'applicazione: ${req.baseUrl}`);
+  lines.push(
+    'Hai a disposizione un browser reale tramite il server MCP Playwright (tool mcp__playwright-ai__*): usalo per esplorare l\'app, verificare i selettori ' +
+      'e, se ti serve mostrare qualcosa all\'utente, scattare uno screenshot (salvalo con un nome breve, es. "shot1.png").'
+  );
+  lines.push(
+    '',
+    'Segui questo processo ad ogni turno:',
+    "1. Se la richiesta dell'utente è ambigua o ti manca un'informazione che solo lui può darti (quale utente usare, quale flusso esatto, cosa verificare), NON indovinare: rispondi con `status: \"question\"` e una o più domande chiare, eventualmente con uno screenshot a supporto.",
+    '2. Se invece hai capito cosa serve ma non hai ancora proposto un piano in questa conversazione (o l\'utente ha appena chiesto una modifica sostanziale), esplora l\'app quanto basta e rispondi con `status: \"plan\"`: un elenco breve e concreto dei passaggi che il test farà. NON scrivere ancora il codice.',
+    '3. Solo dopo che l\'utente ha confermato il piano (un messaggio come "ok", "procedi", "va bene", o che non chiede modifiche al piano), verifica i passaggi dal vivo nel browser e rispondi con `status: \"code\"` contenendo il test finale.',
+    '',
+    '--- Storia della conversazione ---'
+  );
+  for (const turn of req.history) lines.push(`${turn.role === 'user' ? 'Utente' : 'Tu'}: ${turn.text}`);
+  lines.push(`Utente: ${req.instruction.trim()}`);
+  lines.push(
+    '',
+    '--- Struttura obbligatoria del test, quando rispondi con status "code" (è quella che il nostro runner sa eseguire) ---',
+    "1. Il file è SOLO: `import { test, expect } from '@playwright/test';` seguito da UN SOLO `test('nome', async ({ page }) => { ... });` di primo livello.",
+    '2. NIENTE test.describe, test.setTimeout, costanti, funzioni di supporto, hook o import aggiuntivi: tutto il corpo sta dentro quel test, con URL scritti per esteso.',
+    "3. Un'azione per riga, nella forma `await page.<locator>.<azione>(...)`, poi le verifiche con `await expect(...)`. Selettori stabili (getByRole/getByLabel/getByTestId).",
+    req.projectId
+      ? `4. INCAPSULAMENTO: il login e gli altri passaggi ripetuti sono già test a sé stanti del progetto ${req.projectId}. Usa i tool MCP insightest (list_tests, get_test) per trovare il test di login/prerequisito adatto: NON ripeterne i passaggi, parti dallo stato in cui lascia il browser.`
+      : '4. INCAPSULAMENTO: se serve un login, non includerlo: assumi che un test prerequisito lo abbia già fatto.',
+    '',
+    'Rispondi SEMPRE e SOLO con un blocco ```json nella forma seguente (nessun testo fuori dal blocco):',
+    '```json',
+    '{"status":"question"|"plan"|"code","message":"breve messaggio per l\'utente","questions":[{"text":"...","screenshot":"shot1.png"}],"plan":["passo 1","passo 2"],"name":"nome breve e descrittivo del test","code":"...codice typescript...","dependsOn":"nome esatto del test prerequisito oppure null"}',
+    '```',
+    'Lascia vuoti gli array/campi che non servono per lo status scelto (es. con status "plan" lascia `code` e `name` a null). `name` è obbligatorio quando lo status è "code".'
+  );
+  return lines.join('\n');
+}
+
+function parseAiChatAnswer(text: string): Omit<AiChatResult, 'log' | 'exitCode' | 'cancelled'> | null {
+  const blocks = [...text.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)```/g)];
+  for (const block of blocks.reverse()) {
+    try {
+      const parsed = JSON.parse(block[1].trim());
+      if (!parsed || typeof parsed.status !== 'string') continue;
+      const status = parsed.status === 'question' || parsed.status === 'plan' || parsed.status === 'code' ? parsed.status : null;
+      if (!status) continue;
+      return {
+        status,
+        message: typeof parsed.message === 'string' ? parsed.message : undefined,
+        questions: Array.isArray(parsed.questions)
+          ? parsed.questions
+              .filter((q: any) => q && typeof q.text === 'string' && q.text.trim())
+              .map((q: any) => ({ text: q.text.trim(), screenshot: typeof q.screenshot === 'string' && q.screenshot.trim() ? q.screenshot.trim() : null }))
+          : [],
+        plan: Array.isArray(parsed.plan) ? parsed.plan.filter((p: any) => typeof p === 'string' && p.trim()) : [],
+        name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : null,
+        code: typeof parsed.code === 'string' && parsed.code.trim() ? parsed.code.trim() : null,
+        dependsOn: typeof parsed.dependsOn === 'string' && parsed.dependsOn.trim() && !/^none$/i.test(parsed.dependsOn.trim()) ? parsed.dependsOn.trim() : null,
+      };
+    } catch {
+      /* try the previous block */
+    }
+  }
+  return null;
+}
+
+/**
+ * One turn of a conversational test-authoring session: Claude either asks a clarifying question
+ * (optionally with a screenshot), proposes a plan for confirmation, or, once the plan is confirmed,
+ * writes the final test. Each call is a fresh `claude -p` process; the full turn history is replayed
+ * in the prompt so the agent has the context of the conversation so far.
+ */
+export function runAiChat(req: AiChatRequest, onLine?: (line: string) => void): Promise<AiChatResult> {
+  if (currentAiChild) return Promise.reject(new Error(m('A Claude request is already in progress')));
+  const shotsDir = path.join(os.tmpdir(), `insightest-ai-chat-shots-${process.pid}-${Date.now()}`);
+  fs.mkdirSync(shotsDir, { recursive: true });
+  const mcpConfigPath = writePlaywrightMcpConfig(shotsDir);
+  const allowed = ['Read', 'Grep', 'Glob', 'mcp__insightest__get_test', 'mcp__insightest__get_test_runs', 'mcp__insightest__list_tests', 'mcp__playwright-ai'];
+  const prompt = buildAiChatPrompt(req);
+  return new Promise((resolve, reject) => {
+    aiCancelled = false;
+    const child = spawn(
+      AGENT_BIN.claude,
+      ['-p', '--output-format', 'stream-json', '--verbose', '--mcp-config', mcpConfigPath, '--allowedTools', allowed.join(',')],
+      { cwd: req.repoPath || undefined, shell: process.platform === 'win32', env: process.env }
+    );
+    currentAiChild = child;
+    let log = '';
+    let lineBuf = '';
+    let finalText = '';
+    let assistantText = '';
+    const handleLine = (raw: string): void => {
+      const line = raw.trim();
+      if (!line) return;
+      let evt: any;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        onLine?.(line);
+        return;
+      }
+      if (evt.type === 'result' && typeof evt.result === 'string') finalText = evt.result;
+      if (evt.type === 'assistant') {
+        for (const b of evt.message?.content ?? []) if (b.type === 'text') assistantText += `${b.text}\n`;
+      }
+      for (const described of describeStreamEvent(evt)) onLine?.(described);
+    };
+    const timer = setTimeout(() => cancelAiTestRequest(), 15 * 60 * 1000);
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      currentAiChild = null;
+      fs.rm(mcpConfigPath, { force: true }, () => undefined);
+      fs.rm(shotsDir, { recursive: true, force: true }, () => undefined);
+    };
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      log += text;
+      lineBuf += text;
+      const parts = lineBuf.split('\n');
+      lineBuf = parts.pop() ?? '';
+      parts.forEach(handleLine);
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      log += chunk.toString();
+      onLine?.(chunk.toString().trim());
+    });
+    child.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
+    child.on('close', (code) => {
+      handleLine(lineBuf);
+      const cancelled = aiCancelled;
+      const answer = finalText || assistantText;
+      const parsed = cancelled ? null : parseAiChatAnswer(answer);
+      cleanup();
+      if (!parsed) {
+        resolve({
+          status: 'question',
+          message: cancelled ? undefined : m('Claude did not return a usable answer. See the log below.'),
+          questions: [],
+          plan: [],
+          name: null,
+          code: null,
+          dependsOn: null,
+          log,
+          exitCode: code,
+          cancelled,
+        });
+        return;
+      }
+      resolve({
+        ...parsed,
+        questions: parsed.questions.map((q) => ({ text: q.text, screenshot: q.screenshot ? screenshotDataUri(shotsDir, q.screenshot) : null })),
+        log,
+        exitCode: code,
+        cancelled,
+      });
+    });
+    child.stdin?.end(prompt);
+  });
+}
+
 export function runAgentRepair(
   agent: AgentName,
   repoPath: string,
@@ -378,6 +610,10 @@ export interface AiHealRequest {
   baseUrl?: string | null;
   /** Local folder of the app's source: lets the AI find the real data-test/id attributes. */
   repoPath?: string | null;
+  /** The target's prerequisite chain (oldest first: login, then whatever else it depends on), as Playwright
+   * Builder code. The AI's own browser starts with a blank session -- without replaying these first it would
+   * land on the login screen instead of the page the failing step actually runs on. */
+  prerequisites?: { name: string; code: string }[];
   steps: AiHealStep[];
 }
 
@@ -390,8 +626,20 @@ export interface AiHealFix {
   why?: string;
 }
 
+/** Raised instead of a fix when Claude genuinely can't tell what the right action is -- the recorded step's
+ * intent is ambiguous, the app visibly changed (a whole screen/flow that doesn't match the test anymore), or the
+ * test itself looks wrong -- rather than have it guess a selector that merely happens to exist. */
+export interface AiHealQuestion {
+  t: number;
+  i: number;
+  question: string;
+  /** data: URI of the screenshot Claude took of what it was looking at, if it managed to take one. */
+  screenshot?: string | null;
+}
+
 export interface AiHealResult {
   fixes: AiHealFix[];
+  questions: AiHealQuestion[];
   log: string;
   exitCode: number | null;
   cancelled: boolean;
@@ -400,12 +648,31 @@ export interface AiHealResult {
 function buildAiHealPrompt(req: AiHealRequest): string {
   const lines: string[] = [
     `Il test end-to-end "${req.testName}" ha dei passaggi che non trovano più il loro elemento nell'applicazione (selettori non più validi). ` +
-      'Un sistema deterministico ha già provato a ripararli senza riuscirci. Devi proporre il selettore corretto per ciascun passaggio, ' +
-      "basandoti SOLO su ciò che c'è davvero nella pagina (snapshot qui sotto) e, se disponibile, nel codice sorgente dell'app.",
+      'Un sistema deterministico ha già provato a ripararli senza riuscirci.',
+    '',
+    'Hai carta bianca su come arrivarci: hai un browser reale tramite il server MCP Playwright (tool mcp__playwright-ai__*), usalo liberamente. ' +
+      "Per ogni passaggio non risolto apri il browser, naviga all'URL indicato (o a quello base se manca), riproduci lo stato in cui si trovava " +
+      "l'applicazione in quel momento (login, click, scelte precedenti -- usa il nome del test e la pagina riportata per capire a che punto del " +
+      'flusso siamo) e ISPEZIONA DAL VIVO la pagina reale: non fidarti solo dello snapshot statico qui sotto, che può essere incompleto o riferirsi ' +
+      "a un momento leggermente diverso. Prova più selettori nel browser finché non trovi quello che risolve esattamente l'elemento giusto, e solo " +
+      "allora includilo nella risposta -- non proporre MAI un selettore che non hai verificato dal vivo sulla pagina reale dell'applicazione.",
   ];
   if (req.repoPath) lines.push(`Il sorgente dell'applicazione è nella tua cartella di lavoro (${req.repoPath}): puoi cercarci gli attributi data-test/id reali con Grep/Read.`);
   if (req.baseUrl) lines.push(`URL base dell'applicazione: ${req.baseUrl}`);
+  lines.push(`Nome del test: "${req.testName}".`);
   lines.push('');
+  if (req.prerequisites?.length) {
+    lines.push(
+      'IMPORTANTE: il tuo browser parte da zero (nessun login, nessuno stato). I passaggi sotto sono i test PREREQUISITI di questo test ' +
+        '(di solito includono il login) nello stesso ordine in cui li esegue il motore vero -- DEVI rifarli TU STESSO nel tuo browser, uno per uno, ' +
+        "PRIMA di andare alla pagina del passaggio da riparare, altrimenti ti troverai bloccato sulla schermata di login o in uno stato sbagliato. " +
+        "Sono scritti con una piccola API (`pw.<azione>(selettore, valore, ...)`): interpretala come l'azione equivalente nel tuo browser reale " +
+        '(`pw.load(url)` = naviga a quell\'URL, `pw.click(selettore, ...)` = clicca l\'elemento corrispondente, `pw.fill(selettore, valore, ...)` = scrivi quel valore, ecc.).'
+    );
+    for (const p of req.prerequisites) {
+      lines.push(`--- Prerequisito: "${p.name}" ---`, p.code, '');
+    }
+  }
   for (const s of req.steps) {
     lines.push(`=== Passaggio (t=${s.t}, i=${s.i}) — test "${s.testName}", passo ${s.stepNumber} ===`);
     lines.push(`Come è scritto ora: ${s.description}`);
@@ -420,85 +687,136 @@ function buildAiHealPrompt(req: AiHealRequest): string {
     '--- Regole ---',
     '1. `selector` è una stringa di selettore Playwright usabile con page.locator(): CSS (es. `[data-test="Salva"]:visible`), oppure `xpath=//...`, oppure `text="Testo esatto"`.',
     '2. Preferisci attributi stabili: data-test, id NON generati (niente id con numeri casuali o prefissi select2-/ng-/mat-), aria-label, testo visibile. Evita xpath posizionali lunghi.',
-    "3. Il selettore deve identificare UN SOLO elemento: quello che il passaggio voleva usare (stessa azione, stesso scopo). Se nello snapshot non c'è un candidato credibile, NON inventare: ometti quel passaggio.",
-    '4. Per un menu a tendina select2 non risolto, se una delle opzioni elencate corrisponde a ciò che il test voleva, restituisci `option` con il testo ESATTO di quell\'opzione (invece di `selector`).',
+    '3. Il selettore deve identificare UN SOLO elemento, VERIFICATO dal vivo nel browser: quello che il passaggio voleva usare (stessa azione, stesso scopo).',
+    '4. Per un menu a tendina select2 non risolto, se una delle opzioni elencate (o trovate dal vivo aprendo il menu) corrisponde a ciò che il test voleva, restituisci `option` con il testo ESATTO di quell\'opzione (invece di `selector`).',
     '5. `timeoutMs` solo se sei certo che l\'elemento esiste ma compare molto in ritardo.',
+    '6. NON INVENTARE un selettore quando non sei sicuro. Se, dopo aver provato dal vivo, non capisci cosa il passaggio dovrebbe fare, o la pagina/flusso che vedi ' +
+      "non corrisponde affatto a quanto descritto (l'app è cambiata, uno schermo/flusso intero non c'è più, il test sembra scritto per un'altra versione " +
+      "dell'app, o manca un dato/contesto che solo una persona può fornire), FERMATI e CHIEDI invece di indovinare: scatta uno screenshot con lo strumento " +
+      "screenshot del browser (salvalo con un nome breve, es. \"q0.png\") e aggiungi una voce in `questions` con una domanda chiara e specifica per l'utente " +
+      '(cosa vedi, perché sei bloccato, cosa ti serve sapere) e il nome del file dello screenshot in `screenshot`.',
     '',
-    'Rispondi SOLO con un blocco ```json, senza altro testo, in questa forma:',
+    'Rispondi SOLO con un blocco ```json, senza altro testo, in questa forma (puoi includere `fixes`, `questions`, o entrambi -- lascia vuoto l\'array che non ti serve):',
     '```json',
-    '{"fixes":[{"t":0,"i":2,"selector":"[data-test=\\"Salva\\"]:visible","option":null,"timeoutMs":null,"why":"breve motivo"}]}',
+    '{"fixes":[{"t":0,"i":2,"selector":"[data-test=\\"Salva\\"]:visible","option":null,"timeoutMs":null,"why":"breve motivo"}],' +
+      '"questions":[{"t":0,"i":5,"question":"La pagina che vedo dopo il login non ha più il pulsante \\"Nuovo\\": il flusso è cambiato?","screenshot":"q0.png"}]}',
     '```'
   );
   return lines.join('\n');
 }
 
-/** Pulls the fixes out of the model's answer: the last ```json block, else the first balanced {...} containing "fixes". */
-export function parseAiHealAnswer(text: string): AiHealFix[] {
+export interface AiHealAnswer {
+  fixes: AiHealFix[];
+  /** `screenshot` here is still the bare filename Claude chose (e.g. "q0.png"): runAiHeal resolves it against the
+   * MCP server's output dir and turns it into a data: URI before this reaches the caller. */
+  questions: { t: number; i: number; question: string; screenshot: string | null }[];
+}
+
+/** Pulls `{fixes, questions}` out of the model's answer: the last ```json block, else the first balanced {...}
+ * containing "fixes" or "questions". */
+export function parseAiHealAnswer(text: string): AiHealAnswer {
   const candidates: string[] = [];
   for (const m of text.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)```/g)) candidates.push(m[1]);
-  // A bare {"fixes": …} object is only a fallback for answers without any fenced block (else it would pick the FIRST
+  // A bare {...} object is only a fallback for answers without any fenced block (else it would pick the FIRST
   // block's content and let it win over the model's final version).
-  const start = candidates.length ? -1 : text.indexOf('{"fixes"');
-  if (start >= 0) {
-    let depth = 0;
-    for (let i = start; i < text.length; i++) {
-      if (text[i] === '{') depth++;
-      else if (text[i] === '}' && --depth === 0) {
-        candidates.push(text.slice(start, i + 1));
-        break;
+  if (!candidates.length) {
+    const start = Math.max(text.indexOf('{"fixes"'), text.indexOf('{"questions"'));
+    if (start >= 0) {
+      let depth = 0;
+      for (let i = start; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}' && --depth === 0) {
+          candidates.push(text.slice(start, i + 1));
+          break;
+        }
       }
     }
   }
   for (const raw of candidates.reverse()) {
     try {
       const parsed = JSON.parse(raw.trim());
-      if (parsed && Array.isArray(parsed.fixes)) {
-        return parsed.fixes
-          .filter((f: any) => f && Number.isInteger(f.t) && Number.isInteger(f.i))
-          .map((f: any) => ({
-            t: f.t,
-            i: f.i,
-            selector: typeof f.selector === 'string' ? f.selector : null,
-            option: typeof f.option === 'string' ? f.option : null,
-            timeoutMs: Number.isFinite(Number(f.timeoutMs)) && Number(f.timeoutMs) > 0 ? Number(f.timeoutMs) : null,
-            why: typeof f.why === 'string' ? f.why : undefined,
-          }));
-      }
+      if (!parsed || (!Array.isArray(parsed.fixes) && !Array.isArray(parsed.questions))) continue;
+      const fixes = (Array.isArray(parsed.fixes) ? parsed.fixes : [])
+        .filter((f: any) => f && Number.isInteger(f.t) && Number.isInteger(f.i))
+        .map((f: any) => ({
+          t: f.t,
+          i: f.i,
+          selector: typeof f.selector === 'string' ? f.selector : null,
+          option: typeof f.option === 'string' ? f.option : null,
+          timeoutMs: Number.isFinite(Number(f.timeoutMs)) && Number(f.timeoutMs) > 0 ? Number(f.timeoutMs) : null,
+          why: typeof f.why === 'string' ? f.why : undefined,
+        }));
+      const questions = (Array.isArray(parsed.questions) ? parsed.questions : [])
+        .filter((q: any) => q && Number.isInteger(q.t) && Number.isInteger(q.i) && typeof q.question === 'string' && q.question.trim())
+        .map((q: any) => ({ t: q.t, i: q.i, question: q.question.trim(), screenshot: typeof q.screenshot === 'string' && q.screenshot.trim() ? q.screenshot.trim() : null }));
+      return { fixes, questions };
     } catch {
       /* try the next candidate */
     }
   }
-  return [];
+  return { fixes: [], questions: [] };
 }
 
 /**
- * Asks Claude Code (print mode, read-only tools) for the selectors the deterministic healer could not find. It sees the
- * page snapshot taken at the failure and, when a repo path is given, the app's source. The answer is data (JSON) that the
- * app validates and re-runs: the AI never edits the test or the repo.
+ * Asks Claude Code for the selectors the deterministic healer could not find. Unlike a one-shot read of the failure
+ * snapshot, it gets a REAL browser (the same injected Playwright MCP as runAiTestRequest) and full autonomy to use
+ * it: navigate the app (by name/URL), reproduce the broken step's state and try selectors live until one verifiably
+ * works. The answer is still just data (JSON) that the app validates and re-runs: the AI never edits the test or repo.
  */
 export function runAiHeal(req: AiHealRequest, onLine?: (line: string) => void): Promise<AiHealResult> {
   if (currentAiChild) return Promise.reject(new Error(m('A Claude request is already in progress')));
+  const shotsDir = path.join(os.tmpdir(), `insightest-ai-heal-shots-${process.pid}-${Date.now()}`);
+  fs.mkdirSync(shotsDir, { recursive: true });
+  const mcpConfigPath = writePlaywrightMcpConfig(shotsDir);
+  const allowed = ['Read', 'Grep', 'Glob', 'mcp__playwright-ai'];
   const prompt = buildAiHealPrompt(req);
   return new Promise((resolve, reject) => {
     aiCancelled = false;
-    const child = spawn(AGENT_BIN.claude, ['-p', '--allowedTools', 'Read,Grep,Glob'], {
-      cwd: req.repoPath || undefined,
-      shell: process.platform === 'win32',
-      env: process.env,
-    });
+    const child = spawn(
+      AGENT_BIN.claude,
+      ['-p', '--output-format', 'stream-json', '--verbose', '--mcp-config', mcpConfigPath, '--allowedTools', allowed.join(',')],
+      { cwd: req.repoPath || undefined, shell: process.platform === 'win32', env: process.env }
+    );
     currentAiChild = child;
-    let out = '';
-    let err = '';
-    const timer = setTimeout(() => cancelAiTestRequest(), 10 * 60 * 1000);
+    let log = '';
+    let lineBuf = '';
+    let finalText = '';
+    let assistantText = '';
+    const handleLine = (raw: string): void => {
+      const line = raw.trim();
+      if (!line) return;
+      let evt: any;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        onLine?.(line);
+        return;
+      }
+      if (evt.type === 'result' && typeof evt.result === 'string') finalText = evt.result;
+      if (evt.type === 'assistant') {
+        for (const b of evt.message?.content ?? []) if (b.type === 'text') assistantText += `${b.text}\n`;
+      }
+      for (const described of describeStreamEvent(evt)) onLine?.(described);
+    };
+    // Driving a real browser round-trips with the agent's exploration, so this needs much more room than the
+    // read-only path it replaces -- same ceiling as runAiTestRequest.
+    const timer = setTimeout(() => cancelAiTestRequest(), 15 * 60 * 1000);
     const cleanup = (): void => {
       clearTimeout(timer);
       currentAiChild = null;
+      fs.rm(mcpConfigPath, { force: true }, () => undefined);
+      fs.rm(shotsDir, { recursive: true, force: true }, () => undefined);
     };
     child.stdout?.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
+      const text = chunk.toString();
+      log += text;
+      lineBuf += text;
+      const parts = lineBuf.split('\n');
+      lineBuf = parts.pop() ?? '';
+      parts.forEach(handleLine);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      err += chunk.toString();
+      log += chunk.toString();
       onLine?.(chunk.toString().trim());
     });
     child.on('error', (e) => {
@@ -506,11 +824,15 @@ export function runAiHeal(req: AiHealRequest, onLine?: (line: string) => void): 
       reject(e);
     });
     child.on('close', (code) => {
+      handleLine(lineBuf);
       const cancelled = aiCancelled;
+      const answer = finalText || assistantText;
+      const { fixes, questions } = cancelled ? { fixes: [], questions: [] } : parseAiHealAnswer(answer);
+      const resolved = questions.map((q) => ({ t: q.t, i: q.i, question: q.question, screenshot: q.screenshot ? screenshotDataUri(shotsDir, q.screenshot) : null }));
       cleanup();
-      resolve({ fixes: cancelled ? [] : parseAiHealAnswer(out), log: [out, err].filter(Boolean).join('\n'), exitCode: code, cancelled });
+      resolve({ fixes, questions: resolved, log, exitCode: code, cancelled });
     });
-    onLine?.(m('▶▶ Asking Claude to fix the steps that could not be repaired automatically'));
+    onLine?.(m('▶▶ Asking Claude to fix the steps that could not be repaired automatically, with a real browser'));
     child.stdin?.end(prompt);
   });
 }

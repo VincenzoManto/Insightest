@@ -100,7 +100,7 @@ export function StepEditorDrawer({
                     </option>
                   ))}
                 </select>
-                {vLabel && (
+                {vLabel && draft.action !== 'DB' && (
                   <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
                     {t(vLabel)}
                     <input value={draft.value} onChange={(e) => set({ value: e.target.value })} className="w-full" />
@@ -124,6 +124,58 @@ export function StepEditorDrawer({
                   />
                 )}
               </Section>
+
+              {draft.action === 'DB' && (
+                <Section title="Database">
+                  <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
+                    {t('SQL query')}
+                    <textarea
+                      value={draft.value}
+                      onChange={(e) => set({ value: e.target.value })}
+                      rows={3}
+                      spellCheck={false}
+                      className="w-full font-mono text-xs"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
+                    {t('Mode')}
+                    <select value={draft.dbMode ?? 'snapshot'} onChange={(e) => set({ dbMode: e.target.value as 'snapshot' | 'diff' })} className="w-full">
+                      <option value="snapshot">{t('Snapshot (save the rows for a later diff)')}</option>
+                      <option value="diff">{t('Diff (compare against a snapshot)')}</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
+                    {t('Snapshot name')}
+                    <input value={draft.dbSnapshotName ?? ''} onChange={(e) => set({ dbSnapshotName: e.target.value })} placeholder="orders_before" className="w-full" />
+                  </label>
+                  <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
+                    {t('Key column')}
+                    <input
+                      value={draft.dbKeyColumn ?? ''}
+                      onChange={(e) => set({ dbKeyColumn: e.target.value })}
+                      placeholder="id"
+                      className="w-full"
+                      title={t('Column identifying a row across the before/after snapshots (e.g. a primary key)')}
+                    />
+                  </label>
+                  {draft.dbMode === 'diff' && (
+                    <div className="grid grid-cols-3 gap-2">
+                      <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
+                        {t('Expect inserted')}
+                        <input type="number" min={0} value={draft.dbExpectInserted ?? ''} onChange={(e) => set({ dbExpectInserted: e.target.value })} placeholder="—" className="w-full" />
+                      </label>
+                      <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
+                        {t('Expect updated')}
+                        <input type="number" min={0} value={draft.dbExpectUpdated ?? ''} onChange={(e) => set({ dbExpectUpdated: e.target.value })} placeholder="—" className="w-full" />
+                      </label>
+                      <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
+                        {t('Expect deleted')}
+                        <input type="number" min={0} value={draft.dbExpectDeleted ?? ''} onChange={(e) => set({ dbExpectDeleted: e.target.value })} placeholder="—" className="w-full" />
+                      </label>
+                    </div>
+                  )}
+                </Section>
+              )}
 
               {withSelector && (
                 <Section title="Element">

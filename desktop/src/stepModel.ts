@@ -22,6 +22,7 @@ export type StepAction =
   | 'clearInput'
   | 'wait'
   | 'resize'
+  | 'DB'
   | 'raw';
 
 /** Must match BUILDER_META_METHODS in ci-runner/runner.js: these lines consume one steps_json entry each. */
@@ -32,7 +33,7 @@ export type SelectorKey = (typeof SELECTOR_KEYS)[number];
 export type StepSelectors = Record<SelectorKey, string>;
 
 /** Actions the editor can create/convert between, in the order shown in the Action dropdown. */
-export const EDITABLE_ACTIONS: StepAction[] = ['load', 'click', 'doubleClick', 'rightClick', 'hover', 'fill', 'type', 'select', 'select2', 'keydown', 'clearInput', 'wait', 'resize'];
+export const EDITABLE_ACTIONS: StepAction[] = ['load', 'click', 'doubleClick', 'rightClick', 'hover', 'fill', 'type', 'select', 'select2', 'keydown', 'clearInput', 'wait', 'resize', 'DB'];
 
 export const ACTION_LABEL: Record<StepAction, string> = {
   load: 'Load',
@@ -48,6 +49,7 @@ export const ACTION_LABEL: Record<StepAction, string> = {
   clearInput: 'Clear',
   wait: 'Wait',
   resize: 'Resize',
+  DB: 'Query DB',
   raw: 'Code',
 };
 
@@ -72,6 +74,8 @@ export function valueLabel(action: StepAction): string | null {
       return 'Milliseconds';
     case 'resize':
       return 'Width';
+    case 'DB':
+      return 'SQL query';
     default:
       return null;
   }
@@ -107,6 +111,15 @@ export interface EditableStep {
   raw?: string;
   /** True when the runner will count this line as selector-bearing (keeps steps_json aligned even for raw lines). */
   countsMeta: boolean;
+  /** DB action: 'snapshot' saves the query's rows under dbSnapshotName; 'diff' re-runs it (value holds the SQL
+   * in both cases) and compares against that snapshot, asserting the dbExpect* counts. */
+  dbMode?: 'snapshot' | 'diff';
+  dbSnapshotName?: string;
+  /** Column identifying a row across the before/after snapshots (e.g. a primary key). */
+  dbKeyColumn?: string;
+  dbExpectInserted?: string;
+  dbExpectUpdated?: string;
+  dbExpectDeleted?: string;
 }
 
 export interface ParsedBuilderTest {
@@ -139,6 +152,9 @@ export function newStep(action: StepAction = 'click'): EditableStep {
     timeout: '',
     waitBeforeMs: '',
     countsMeta: hasSelector(action),
+    dbMode: action === 'DB' ? 'snapshot' : undefined,
+    dbSnapshotName: action === 'DB' ? '' : undefined,
+    dbKeyColumn: action === 'DB' ? 'id' : undefined,
   };
 }
 
@@ -289,6 +305,19 @@ function stepFromCall(method: string, args: unknown[], meta: any, rawLine: strin
       step.action = 'clearInput';
       setSel(args[0]);
       break;
+    case 'DB': {
+      step.action = 'DB';
+      step.value = str(args[0]);
+      const opts = (args[1] && typeof args[1] === 'object' ? args[1] : {}) as Record<string, unknown>;
+      step.dbMode = opts.mode === 'diff' ? 'diff' : 'snapshot';
+      step.dbSnapshotName = str(opts.name);
+      step.dbKeyColumn = str(opts.keyColumn) || 'id';
+      const expect = (opts.expect && typeof opts.expect === 'object' ? opts.expect : {}) as Record<string, unknown>;
+      step.dbExpectInserted = str(expect.inserted);
+      step.dbExpectUpdated = str(expect.updated);
+      step.dbExpectDeleted = str(expect.deleted);
+      break;
+    }
     default:
       return step; // unknown method: kept verbatim as a raw step
   }
@@ -421,6 +450,17 @@ function callLine(step: EditableStep, priority: readonly string[]): string {
       return `await pw.select2(${sel}, ${step.valueIsNumber && step.value.trim() !== '' ? num(step.value, 0) : q(step.value)}, ${nav});`;
     case 'clearInput':
       return `await pw.clearInput(${sel});`;
+    case 'DB': {
+      const opts: Record<string, unknown> = { mode: step.dbMode === 'diff' ? 'diff' : 'snapshot', name: step.dbSnapshotName || '', keyColumn: step.dbKeyColumn || 'id' };
+      if (step.dbMode === 'diff') {
+        const expect: Record<string, number> = {};
+        if (step.dbExpectInserted?.trim()) expect.inserted = num(step.dbExpectInserted, 0);
+        if (step.dbExpectUpdated?.trim()) expect.updated = num(step.dbExpectUpdated, 0);
+        if (step.dbExpectDeleted?.trim()) expect.deleted = num(step.dbExpectDeleted, 0);
+        opts.expect = expect;
+      }
+      return `await pw.DB(${q(step.value)}, ${q(opts)});`;
+    }
     default:
       return step.raw ?? '';
   }
@@ -449,6 +489,40 @@ export function serializeBuilderTest(parsed: ParsedBuilderTest, priority: readon
   return { code, steps: steps.some((m) => m !== null) ? steps : null };
 }
 
+/* ------------------------------------------------------------------ build from a recording */
+
+/** Shape produced by `window.insightest.playwright.recordBuilderSteps` (electron/runnerCore.ts
+ * `recordBuilderSteps`) -- declared structurally here instead of importing the electron-bridge type to
+ * keep this module's only dependency direction (UI -> stepModel), not the reverse. */
+export interface RecordedStepInput {
+  action: string;
+  selectors: Partial<StepSelectors>;
+  value: string;
+  valueIsNumber: boolean;
+  causesNavigation: boolean;
+  textHint?: string;
+  tagHint?: string;
+}
+
+/** Turns a fresh recording into an editable builder test, ready for `serializeBuilderTest()`. */
+export function builderTestFromRecordedSteps(recorded: RecordedStepInput[], testName: string): ParsedBuilderTest {
+  const steps: EditableStep[] = recorded.map((r) => {
+    const action = (EDITABLE_ACTIONS as string[]).includes(r.action) ? (r.action as StepAction) : 'click';
+    const step = newStep(action);
+    if (hasSelector(action)) step.selectors = { ...emptySelectors(), ...r.selectors };
+    step.value = r.value;
+    step.valueIsNumber = r.valueIsNumber;
+    step.causesNavigation = r.causesNavigation;
+    step.textHint = r.textHint;
+    step.tagHint = r.tagHint;
+    return step;
+  });
+  const safeName = testName.replace(/'/g, "\\'");
+  const head = `import { test, expect } from '@playwright/test';\nimport { PlaywrightBuilder } from './pwBuilder';\n\ntest('${safeName}', async ({ page }) => {\n  const pw = new PlaywrightBuilder(page);`;
+  const foot = `});\n`;
+  return { head, foot, steps };
+}
+
 /* ------------------------------------------------------------------ display helpers */
 
 export function stepPrimaryLabel(step: EditableStep, priority: readonly string[]): string {
@@ -456,12 +530,14 @@ export function stepPrimaryLabel(step: EditableStep, priority: readonly string[]
   if (step.action === 'load') return step.value;
   if (step.action === 'wait') return `${step.value || 0}ms`;
   if (step.action === 'resize') return `${step.value} × ${step.value2}`;
+  if (step.action === 'DB') return `${step.dbMode === 'diff' ? 'diff' : 'snapshot'} "${step.dbSnapshotName || ''}"`;
   return primarySelector(step, priority) || '—';
 }
 
 /** Value shown after the arrow in the step list (typed text, key, option...). */
 export function stepDetail(step: EditableStep): string | undefined {
   if (['fill', 'type', 'select', 'select2', 'keydown'].includes(step.action) && step.value) return step.value;
+  if (step.action === 'DB' && step.value) return step.value;
   return undefined;
 }
 

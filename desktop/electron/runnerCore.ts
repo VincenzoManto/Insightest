@@ -68,6 +68,9 @@ export interface PlaywrightRunOptions {
   selectorPriority?: string[];
   /** Self-healing run: broken steps are fixed on the fly and reported as heal events instead of failing the run. */
   heal?: boolean;
+  /** Decrypted DB connection string for the project, used by "DB" test steps; fetched by the renderer
+   * right before the run and never persisted. Omitted/null when the project has no DB configured. */
+  dbConnectionString?: string | null;
 }
 
 export interface BaselineResult {
@@ -154,7 +157,7 @@ const noBaselineMessage = (): string =>
 function runProcessAsync(
   bin: string,
   args: string[],
-  options: { cwd: string; env?: NodeJS.ProcessEnv; input?: string; onLine?: (line: string) => void }
+  options: { cwd: string; env?: NodeJS.ProcessEnv; input?: string; onLine?: (line: string) => void; timeoutMs?: number }
 ): Promise<{ stdout: string; stderr: string; status: number | null }> {
   return new Promise((resolve, reject) => {
     const isScript = bin.endsWith('.js');
@@ -185,7 +188,17 @@ function runProcessAsync(
     });
     child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
     child.on('error', reject);
+    // No timeout here by default: a real test run (headed, waiting on the user, slow CI
+    // targets) can legitimately take a long time. Callers that replay actions unattended
+    // (nothing to wait on, a hang means the target app genuinely got stuck) opt into one.
+    const timer = options.timeoutMs
+      ? setTimeout(() => {
+          stderr += `\n[insightest] timed out after ${options.timeoutMs}ms, killing the process\n`;
+          child.kill();
+        }, options.timeoutMs)
+      : null;
     child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
       if (options.onLine && lineBuf) options.onLine(lineBuf);
       resolve({ stdout, stderr, status: code });
     });
@@ -389,7 +402,7 @@ function replaceTestBody(code: string, newBody: string): string {
 
 /** Makes builder code runnable: `pw` in scope (one PlaywrightBuilder per test) and the builder module required
  * from next to this file (dist-electron/pwBuilder.js). No-op for tests in the older page.locator format. */
-function withBuilderRuntime(code: string, priority?: string[]): string {
+function withBuilderRuntime(code: string, priority?: string[], dbConnectionString?: string | null): string {
   if (!usesBuilder(code)) return code;
   const builderPath = path.join(path.dirname(getPaths().liveReporterPath), 'pwBuilder.js').replace(/\\/g, '/');
   const requireLine = `const { PlaywrightBuilder } = require(${JSON.stringify(builderPath)});`;
@@ -399,7 +412,7 @@ function withBuilderRuntime(code: string, priority?: string[]): string {
   const marker = /async\s*\([^)]*\)\s*=>\s*\{/.exec(out);
   if (!marker) return out;
   const at = marker.index + marker[0].length;
-  const ctor = `\n  const pw = new PlaywrightBuilder(page, { priority: ${JSON.stringify(priority ?? null)} });\n`;
+  const ctor = `\n  const pw = new PlaywrightBuilder(page, { priority: ${JSON.stringify(priority ?? null)}, dbConnectionString: ${JSON.stringify(dbConnectionString ?? null)} });\n`;
   return out.slice(0, at) + ctor + out.slice(at);
 }
 
@@ -612,7 +625,7 @@ async function executeSpec(
   const specPath = path.join(workDir, specFileName);
   const reportPath = path.join(workDir, 'report.json');
   const configPath = path.join(workDir, 'playwright.config.js');
-  fs.writeFileSync(specPath, withSmartFill(withResilientActions(withBuilderRuntime(source, options.selectorPriority), steps)), 'utf8');
+  fs.writeFileSync(specPath, withSmartFill(withResilientActions(withBuilderRuntime(source, options.selectorPriority, options.dbConnectionString), steps)), 'utf8');
   // Playwright's default 30s per-test timeout counts the *whole* test body, including any
   // dependency test spliced in by the caller and every explicit `waitForTimeout()` from the
   // legacy recording -- both easily blow past 30s on their own, so the budget must scale with
@@ -623,8 +636,11 @@ async function executeSpec(
   // Builder actions retry with escalating timeouts (8s/15s/20s) and settle after navigations, so each one can
   // legitimately take far longer than a bare Playwright call.
   const builderActionCount = (source.match(/^\s*await pw\./gm) ?? []).length;
-  // A heal run may wait up to ~40s per broken step (probing + a long retry of the original selector).
-  const timeoutMs = Math.max(30000, Math.round((explicitWaitMs + slowMoOverheadMs) * 1.5) + 30000 + builderActionCount * (options.heal ? 45000 : 6000));
+  // A heal run may wait up to ~40s per broken step (probing + a long retry of the original selector),
+  // and however generous the estimate below is, it is still a guess -- a wrong one would cut the test
+  // off mid-action and report it as a timeout instead of a plain failure. So heal runs get NO cap at
+  // all (0 = unlimited in Playwright); only normal runs keep the estimated budget.
+  const timeoutMs = options.heal ? 0 : Math.max(30000, Math.round((explicitWaitMs + slowMoOverheadMs) * 1.5) + 30000 + builderActionCount * 6000);
   const liveReporterPath = getPaths().liveReporterPath;
   const reportPathForConfig = reportPath.replace(/\\/g, '/');
   // A dedicated config (rather than bare CLI flags) is needed for the inter-action delay
@@ -900,17 +916,26 @@ export async function healTest(
 }
 
 /**
- * Opens Playwright's codegen recorder against startUrl; the user interacts with the
- * launched browser, and closing that browser (or the inspector) ends the recording.
- * Returns the generated test source, or null if nothing was recorded.
+ * Opens Playwright's codegen recorder against startUrl; the user interacts with the launched
+ * browser, and closing that browser (or the inspector) ends the recording. Returns the generated
+ * test source (or null if nothing was recorded) and, when `captureStorageState` is set, the
+ * session's cookies/localStorage as of the last periodic snapshot -- so a later unattended replay
+ * (recordBuilderSteps's selector-capture pass) can reuse the just-recorded login instead of
+ * hitting it with a logged-out session and failing on every single step.
  */
-export async function recordPlaywrightTest(startUrl: string): Promise<string | null> {
+async function runInteractiveRecording(
+  startUrl: string,
+  captureStorageState: boolean
+): Promise<{ code: string | null; storageState: string | null }> {
   const workDir = makeScratchDir('codegen-');
   const outputPath = path.join(workDir, 'recorded.spec.ts');
   const scriptPath = path.join(workDir, 'record.js');
+  const storageStatePath = path.join(workDir, 'storage-state.json');
 
-  // `playwright codegen` always starts with recording ON; the recorder's "standby" mode (same
-  // as clicking the record button off) isn't exposed by the CLI, so drive it from a tiny script.
+  // This playwright-core build only accepts 'inspecting'/'recording' for mode -- 'standby'
+  // (used by some versions to suppress the initial goto from the recording) throws synchronously,
+  // so start straight in 'recording'; the initial page.goto() ends up captured too, but
+  // withRuntimeHelpers() below already skips adding its own goto when one is present in the code.
   fs.writeFileSync(
     scriptPath,
     `const { chromium } = require('playwright-core');
@@ -921,12 +946,25 @@ export async function recordPlaywrightTest(startUrl: string): Promise<string | n
     language: 'playwright-test',
     launchOptions: { headless: false },
     contextOptions: {},
-    mode: 'standby',
+    mode: 'recording',
     outputFile: ${JSON.stringify(outputPath)},
     handleSIGINT: false,
   });
   const page = await context.newPage();
   await page.goto(${JSON.stringify(startUrl)});
+  ${
+    captureStorageState
+      ? `// There is no single "recording ended" moment to hook a final snapshot onto (the browser/
+  // context/page close in whatever order the OS delivers), so keep refreshing it while the user
+  // is still interacting; whichever snapshot was last written when the browser closes is used.
+  const __insightestStorageTimer = setInterval(() => { context.storageState({ path: ${JSON.stringify(storageStatePath)} }).catch(() => {}); }, 2000);`
+      : ''
+  }
+  // Closing the Inspector window (the "stop recording" affordance) only closes the target
+  // page/context, not necessarily the browser process itself -- without forcing browser.close()
+  // here too, 'disconnected' below never fires and the caller hangs forever.
+  context.on('close', () => browser.close().catch(() => {}));
+  page.on('close', () => browser.close().catch(() => {}));
   browser.on('disconnected', () => process.exit(0));
 })().catch((e) => { console.error(e); process.exit(1); });
 `,
@@ -944,8 +982,295 @@ export async function recordPlaywrightTest(startUrl: string): Promise<string | n
   });
 
   const code = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : '';
+  const storageState = captureStorageState && fs.existsSync(storageStatePath) ? fs.readFileSync(storageStatePath, 'utf8') : null;
   fs.rmSync(workDir, { recursive: true, force: true });
-  return code.trim() ? withRuntimeHelpers(code, startUrl) : null;
+  return { code: code.trim() ? withRuntimeHelpers(code, startUrl) : null, storageState };
+}
+
+export async function recordPlaywrightTest(startUrl: string): Promise<string | null> {
+  return (await runInteractiveRecording(startUrl, false)).code;
+}
+
+export interface RecordedBuilderStep {
+  action: string;
+  selectors: Partial<StepSelectors>;
+  value: string;
+  valueIsNumber: boolean;
+  causesNavigation: boolean;
+  textHint?: string;
+  tagHint?: string;
+}
+
+interface StepSelectors {
+  xpath: string;
+  generalSelector: string;
+  attrSelector: string;
+  testIdSelector: string;
+  id: string;
+  text: string;
+}
+
+interface CapturedSelectorMeta {
+  byKey: Partial<StepSelectors>;
+  textHint: string;
+  tagHint: string;
+}
+
+interface ParsedActionEntry {
+  indent: string;
+  chain: string;
+  method: string;
+  args: string;
+}
+
+/** Every `await page.<chain>.<method>(<args>);` line in `code`, in source order (fresh regex instance -- `exec`
+ * loops must not share the module-level ACTION_LINE_RE's `lastIndex` with its other `.replace()` callers). */
+function parseActionEntries(code: string): ParsedActionEntry[] {
+  const re = new RegExp(ACTION_LINE_RE.source, 'gm');
+  const out: ParsedActionEntry[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code))) {
+    out.push({ indent: m[1], chain: m[2], method: m[3], args: m[4] });
+  }
+  return out;
+}
+
+function parseJsonArgs(args: string): unknown[] {
+  try {
+    const v = JSON.parse(`[${args}]`);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Codegen method -> PlaywrightBuilder step action; null means the builder format has no
+ * equivalent (the step is dropped rather than emitted as a broken `pw.*` call). */
+const CODEGEN_METHOD_TO_STEP_ACTION: Record<string, string | null> = {
+  click: 'click',
+  dblclick: 'doubleClick',
+  hover: 'hover',
+  fill: 'fill',
+  type: 'type',
+  selectOption: 'select',
+  press: 'keydown',
+  check: 'click',
+  uncheck: 'click',
+  tap: 'click',
+  setInputFiles: null,
+  selectText: null,
+};
+
+/**
+ * A usable selector straight out of codegen's own (already reliable) locator chain, e.g.
+ * `page.getByRole('button', { name: 'Submit' })` -> `{ text: 'Submit' }` or `page.locator('#id')`
+ * -> `{ id: '#id' }`. This is the step's selector BASELINE: the live-DOM replay below enriches it
+ * with extra candidates when it succeeds, but a step must never end up with no selector at all
+ * just because that replay failed (wrong session, a now-non-idempotent app, a timeout...) --
+ * codegen's own chain already identified the element correctly once, during the real interaction.
+ */
+function translateCodegenChain(chain: string): Partial<StepSelectors> {
+  let m: RegExpExecArray | null;
+  if ((m = /^page\.getByTestId\(['"]([^'"]*)['"]\)$/.exec(chain))) return { testIdSelector: `[data-testid="${m[1]}"]` };
+  if ((m = /^page\.getByPlaceholder\(['"]([^'"]*)['"]\)$/.exec(chain))) return { attrSelector: `[placeholder="${m[1]}"]` };
+  if ((m = /^page\.locator\(['"](#[\w-]+)['"]\)$/.exec(chain))) return { id: m[1] };
+  if ((m = /^page\.locator\((['"])xpath=(.*)\1\)$/.exec(chain))) return { xpath: m[2] };
+  if ((m = /^page\.locator\((['"])text=(.*)\1\)$/.exec(chain))) return { text: m[2] };
+  if ((m = /^page\.getByText\(['"]([^'"]*)['"]\)$/.exec(chain))) return { text: m[1] };
+  if ((m = /^page\.getByLabel\(['"]([^'"]*)['"]\)$/.exec(chain))) return { text: m[1] };
+  if ((m = /^page\.locator\(['"]([^'"]*)['"]\)$/.exec(chain))) return { generalSelector: m[1] };
+  // `getByRole('button', { name: 'X' })`'s accessible name is real text, but a role with no name
+  // argument at all -- `getByRole('switch')`, `getByRole('checkbox')` -- has none: the role string
+  // itself ('switch') is not visible text, so matching it against getByText would find nothing or
+  // the wrong element. [role="x"] is the honest equivalent of what getByRole('x') actually targets.
+  if ((m = /^page\.getByRole\(['"]([\w-]+)['"]\)$/.exec(chain))) return { attrSelector: `[role="${m[1]}"]` };
+  // Anything more exotic codegen emits (filter chains, nested locators: `page.locator('div.card')
+  // .filter({ hasText: 'X' }).getByRole('button')`) almost always names the element's visible
+  // text/accessible name via a `name:`/`hasText:` option -- prefer that over a bare quoted string,
+  // which is as likely to be a CSS fragment (the first example's 'div.card') as real text.
+  if ((m = /(?:name|hasText):\s*['"]([^'"]*)['"]/.exec(chain))) return { text: m[1] };
+  const quoted = [...chain.matchAll(/['"]([^'"]{1,80})['"]/g)];
+  if (quoted.length) return { text: quoted[quoted.length - 1][1] };
+  return {};
+}
+
+/** `selectOption`'s codegen argument is a string, an array, or `{ value | label }`; the builder's
+ * `select()` just wants a plain string (matched against the <option>'s value, per pwBuilder.js). */
+function selectOptionValue(args: unknown[]): string {
+  const a = args[0];
+  if (typeof a === 'string') return a;
+  if (Array.isArray(a)) return selectOptionValue([a[0]]);
+  if (a && typeof a === 'object') {
+    const o = a as Record<string, unknown>;
+    if (typeof o.value === 'string') return o.value;
+    if (typeof o.label === 'string') return o.label;
+  }
+  return '';
+}
+
+/**
+ * Instruments `code` (already through `normalizeSelect2Options`) so every recorded action is
+ * preceded by a call that reads the live DOM element and classifies it into the project's
+ * SELECTOR_KEYS (id / testIdSelector / attrSelector / generalSelector / xpath / text) -- unlike
+ * `withCaptureInstrumentation` (which collects an unordered list of fallback selectors), this
+ * keeps one value per key so the result can be written straight into a builder step's `selectors`.
+ * Mirrors withCaptureInstrumentation's structure; see that function for the instrumentation shape.
+ */
+function withBuilderCaptureInstrumentation(code: string, outputPath: string): string {
+  const re = /^import\s*\{\s*test\s*,\s*expect\s*\}\s*from\s*(['"])([^'"]+)\1;?/m;
+  const match = re.exec(code);
+  const specifier = match ? match[2] : '@playwright/test';
+  const bodyOnly = match ? code.replace(re, '') : code;
+  const instrumented = bodyOnly.replace(ACTION_LINE_RE, (fullMatch, indent: string, chain: string) => {
+    return `${indent}await __insightestCaptureBuilderStep(${chain});\n${fullMatch.replace(/^\s*/, indent)}`;
+  });
+  const outputPathForCode = outputPath.replace(/\\/g, '/');
+  const header =
+    `import { test, expect } from '${specifier}';\n\n` +
+    `const __insightestFs = require('fs');\n` +
+    `const __insightestSteps = [];\n` +
+    `async function __insightestCaptureBuilderStep(locator) {\n` +
+    `  try {\n` +
+    `    const handle = await locator.first().elementHandle({ timeout: 5000 });\n` +
+    `    if (!handle) { __insightestSteps.push({ byKey: {}, textHint: '', tagHint: '' }); return; }\n` +
+    `    const meta = await handle.evaluate((el) => {\n` +
+    `      const byKey = {};\n` +
+    `      if (el.id) byKey.id = '#' + CSS.escape(el.id);\n` +
+    `      const testAttr = ['data-testid', 'data-test-id', 'data-test'].find((a) => el.getAttribute(a));\n` +
+    `      if (testAttr) byKey.testIdSelector = '[' + testAttr + '="' + el.getAttribute(testAttr) + '"]';\n` +
+    `      const attrName = ['name', 'placeholder', 'aria-label', 'value'].find((a) => el.getAttribute(a));\n` +
+    `      if (attrName) byKey.attrSelector = '[' + attrName + '="' + el.getAttribute(attrName) + '"]';\n` +
+    `      const stableClass = Array.from(el.classList || []).find((c) => !/^(?:[a-z]+-)?[0-9a-f]{6,}$/i.test(c) && !/\\d{3,}/.test(c));\n` +
+    `      if (stableClass) {\n` +
+    `        byKey.generalSelector = '.' + CSS.escape(stableClass);\n` +
+    `      } else {\n` +
+    `        const tag = el.tagName.toLowerCase();\n` +
+    `        const siblings = Array.from(el.parentElement ? el.parentElement.children : []).filter((s) => s.tagName === el.tagName);\n` +
+    `        byKey.generalSelector = tag + ':nth-of-type(' + (siblings.indexOf(el) + 1) + ')';\n` +
+    `      }\n` +
+    `      function xpathOf(node) {\n` +
+    `        if (!node || node.nodeType !== 1) return '';\n` +
+    `        if (node === document.body) return '/html/body';\n` +
+    `        const siblings = node.parentNode ? Array.from(node.parentNode.children).filter((s) => s.tagName === node.tagName) : [];\n` +
+    `        const ix = siblings.indexOf(node);\n` +
+    `        return xpathOf(node.parentElement) + '/' + node.tagName.toLowerCase() + (siblings.length > 1 ? '[' + (ix + 1) + ']' : '');\n` +
+    `      }\n` +
+    `      byKey.xpath = xpathOf(el);\n` +
+    `      const text = (el.textContent || '').trim().slice(0, 80);\n` +
+    `      byKey.text = text || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('value') || '';\n` +
+    `      return { byKey, textHint: byKey.text, tagHint: el.tagName.toLowerCase() };\n` +
+    `    });\n` +
+    `    __insightestSteps.push(meta);\n` +
+    `  } catch (e) {\n` +
+    `    __insightestSteps.push({ byKey: {}, textHint: '', tagHint: '' });\n` +
+    `  }\n` +
+    `}\n\n` +
+    `test.afterAll(async () => {\n` +
+    `  __insightestFs.writeFileSync('${outputPathForCode}', JSON.stringify(__insightestSteps), 'utf8');\n` +
+    `});\n`;
+  return `${header}\n${instrumented}`;
+}
+
+/**
+ * Records a session exactly like `recordPlaywrightTest`, but converts the result into
+ * PlaywrightBuilder steps (`pw.click(...)`, `pw.select2(...)`, ...) instead of raw `page.*` code:
+ * each recorded action is replayed once (headless) to read live-DOM selector candidates classified
+ * into the project's SELECTOR_KEYS, and select2's trigger-click + overlay-option-click pair (see
+ * `normalizeSelect2Options`) is folded into a single `select2` step, using the option's own text
+ * (captured live, same as `select2ByText`) when available and falling back to its position.
+ * Best-effort like `augmentRecordedSteps`: a step the replay couldn't re-resolve gets empty selectors
+ * rather than aborting the whole conversion.
+ */
+export async function recordBuilderSteps(startUrl: string): Promise<RecordedBuilderStep[] | null> {
+  const { code: rawCode, storageState } = await runInteractiveRecording(startUrl, true);
+  if (!rawCode) return null;
+  const normalized = normalizeSelect2Options(rawCode);
+  const entries = parseActionEntries(normalized);
+  const out: RecordedBuilderStep[] = [{ action: 'load', selectors: {}, value: startUrl, valueIsNumber: false, causesNavigation: false }];
+  if (!entries.length) return out;
+
+  const workDir = makeScratchDir('buildcapture-');
+  const outputPath = path.join(workDir, 'steps.json');
+  const configPath = path.join(workDir, 'playwright.config.js');
+  const specPath = path.join(workDir, 'capture.spec.ts');
+  fs.writeFileSync(specPath, withBuilderCaptureInstrumentation(normalized, outputPath), 'utf8');
+  // Reuses the just-recorded session (cookies/localStorage): without it this unattended replay
+  // starts logged out and every single selector capture comes back empty on an app that requires
+  // login, which is most of them.
+  let storageStateConfig = '';
+  if (storageState) {
+    const storageStatePath = path.join(workDir, 'storage-state.json');
+    fs.writeFileSync(storageStatePath, storageState, 'utf8');
+    storageStateConfig = `, use: { storageState: ${JSON.stringify(storageStatePath.replace(/\\/g, '/'))} }`;
+  }
+  fs.writeFileSync(configPath, `module.exports = { timeout: 60000${storageStateConfig} };\n`, 'utf8');
+  try {
+    // Unattended replay of what the user just did, often against a now-not-idempotent app
+    // (a submit that only works once, a session side effect) -- it has no one to wait on, so a
+    // hang here means the replay got stuck, not that it legitimately needs more time. Capped
+    // so a stuck replay can't leave the "Recording..." button spinning forever.
+    await runProcessAsync(playwrightBin(), ['test', 'capture.spec.ts', '--config', configPath], { cwd: workDir, env: process.env, timeoutMs: 90000 });
+  } catch {
+    // Best-effort, same as augmentRecordedSteps: fall through to whatever got written out.
+  }
+  let captured: CapturedSelectorMeta[] = [];
+  try {
+    captured = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+  } catch {
+    captured = [];
+  }
+  fs.rmSync(workDir, { recursive: true, force: true });
+
+  const emptyCap: CapturedSelectorMeta = { byKey: {}, textHint: '', tagHint: '' };
+  // Codegen's own chain first (always available, never depends on the replay succeeding), the
+  // live-DOM replay's richer candidates layered on top wherever it got that far.
+  const selectorsFor = (entry: ParsedActionEntry, cap: CapturedSelectorMeta): Partial<StepSelectors> => ({
+    ...translateCodegenChain(entry.chain),
+    ...cap.byKey,
+  });
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (SELECT2_INDEX_CHAIN_RE.test(entry.chain.trim())) continue; // consumed by the preceding trigger entry
+    const cap = captured[i] || emptyCap;
+    const selectors = selectorsFor(entry, cap);
+    const textHint = cap.textHint || selectors.text || '';
+    const next = entries[i + 1];
+    const nextMatch = next ? SELECT2_INDEX_CHAIN_RE.exec(next.chain.trim()) : null;
+    if (entry.method === 'click' && nextMatch) {
+      // The option entry's chain is always the normalized `.nth(N)` placeholder (see
+      // normalizeSelect2Options), never the option's real text -- only the live replay's
+      // textHint (the <li>'s own textContent) is meaningful here; no codegen-chain fallback for it.
+      const nextCap = captured[i + 1] || emptyCap;
+      const optionText = nextCap.textHint || '';
+      const position = Number(nextMatch[1]) + 1;
+      out.push({
+        action: 'select2',
+        selectors,
+        value: optionText || String(position),
+        valueIsNumber: !optionText,
+        causesNavigation: false,
+        textHint,
+        tagHint: cap.tagHint,
+      });
+      continue;
+    }
+    const action = CODEGEN_METHOD_TO_STEP_ACTION[entry.method];
+    if (!action) continue; // no builder equivalent (setInputFiles, selectText): dropped rather than emitted broken
+    const args = parseJsonArgs(entry.args);
+    let value = '';
+    if (action === 'fill' || action === 'type' || action === 'keydown') value = typeof args[0] === 'string' ? (args[0] as string) : '';
+    else if (action === 'select') value = selectOptionValue(args);
+    out.push({
+      action,
+      selectors,
+      value,
+      valueIsNumber: false,
+      causesNavigation: false,
+      textHint,
+      tagHint: cap.tagHint,
+    });
+  }
+  return out;
 }
 
 const RUNTIME_HELPERS = `/** Never hard-fail on Playwright's strict-mode (locator matched >1 element): legacy

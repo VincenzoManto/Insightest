@@ -7,7 +7,7 @@
 import type { AiHealRequest, AiHealResult, ResilientStepMeta, RunResult } from './electron-bridge';
 import type { TestDetail } from './types';
 import { parseBuilderTest, serializeBuilderTest, type ParsedBuilderTest } from './stepModel';
-import { applyProposals, applyToTests, eventsFromAiFixes, proposalsFromEvents, type HealProposal, type HealTest, type UnresolvedStep } from './healing';
+import { applyProposals, applyToTests, eventsFromAiFixes, proposalsFromEvents, questionsFromAi, type HealProposal, type HealQuestion, type HealTest, type UnresolvedStep } from './healing';
 import { findMissingSteps, proposalsFromMissingSteps, type OtherTest } from './missingSteps';
 
 export type TargetState = 'pending' | 'running' | 'healed' | 'nochange' | 'unresolved' | 'failed' | 'unsupported';
@@ -55,6 +55,8 @@ export interface HealFlowState {
   proposals: HealProposal[];
   /** Steps nobody could repair (the run stopped there). */
   unresolved: UnresolvedStep[];
+  /** Steps the AI declined to guess on, with the question it's asking the user instead. */
+  questions: HealQuestion[];
   /** Every other test of the project, parsed once and reused across targets (null = not loaded yet). */
   otherTests: OtherTest[] | null;
   /** Targets already checked against similar tests, so the comparison runs once per target even across AI rounds. */
@@ -62,7 +64,7 @@ export interface HealFlowState {
 }
 
 export function newHealState(): HealFlowState {
-  return { originals: new Map(), drafts: new Map(), proposals: [], unresolved: [], otherTests: null, missingStepsChecked: new Set() };
+  return { originals: new Map(), drafts: new Map(), proposals: [], unresolved: [], questions: [], otherTests: null, missingStepsChecked: new Set() };
 }
 
 /** Compares `testId`'s current draft against the other tests of the project and turns any step they have that this
@@ -165,15 +167,28 @@ async function healTarget(testId: number, deps: HealFlowDeps, state: HealFlowSta
 
     if (!deps.useAi || !deps.aiHeal || aiRounds >= MAX_AI_ROUNDS) break;
     aiRounds++;
+    // `chain` is oldest-first ending with the target itself: everything before it is what the AI's OWN
+    // (blank, logged-out) browser must replay first, or it will land on the login screen instead of the
+    // page the failing step actually runs on.
+    const prerequisites = chain.slice(0, -1).map((id) => ({
+      name: state.originals.get(id)!.detail.name,
+      code: serializeBuilderTest(state.drafts.get(id)!, deps.priority).code,
+    }));
     const ai = await deps.aiHeal({
       testName: target.name,
       baseUrl: deps.baseUrl,
       repoPath: deps.repoPath,
+      prerequisites,
       steps: unresolved.map((u) => ({ t: u.t, i: u.i, testName: u.testName, stepNumber: u.stepNumber, description: u.description, failed: u.failed, evidence: u.evidence, url: u.url, snapshot: u.snapshot })),
     });
+    // Only the latest round's assessment of this chain stands: a question about a step fixed in this very round
+    // (or no longer reproducible) must not linger from an earlier round.
+    const questions = questionsFromAi(ai.questions ?? [], unresolved);
+    state.questions = state.questions.filter((q) => !chain.includes(q.testId)).concat(questions);
+
     const events = eventsFromAiFixes(ai.fixes, unresolved);
     if (!events.length) {
-      deps.onLog('   the AI had no reliable fix for the remaining steps');
+      deps.onLog(questions.length ? `   Claude asked ${questions.length} question(s) instead of guessing` : '   the AI had no reliable fix for the remaining steps');
       break;
     }
     const current = healTestsOf(chain, state);

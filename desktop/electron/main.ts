@@ -8,6 +8,7 @@ import {
   runPlaywrightTest,
   recordPlaywrightTest,
   augmentRecordedSteps,
+  recordBuilderSteps,
   explainFailure,
   createOrUpdateBaseline,
   baselineExists,
@@ -20,10 +21,12 @@ import {
   detectAiTestStatus,
   runAiTestRequest,
   runAiHeal,
+  runAiChat,
   cancelAiTestRequest,
   type AgentName,
   type AiHealRequest,
   type AiTestRequest,
+  type AiChatRequest,
 } from './agentRepair';
 
 // Without these, any exception thrown outside an IPC handler's promise chain (a stray
@@ -109,7 +112,7 @@ ipcMain.handle('auth:clear', () => {
   if (fs.existsSync(authFilePath)) fs.unlinkSync(authFilePath);
 });
 
-ipcMain.handle('playwright:run', async (event, playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => {
+ipcMain.handle('playwright:run', async (event, playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean; dbConnectionString?: string | null }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => {
   return runPlaywrightTest(playwrightCode, options, dependencyCodes, (line) => event.sender.send('playwright:progress', line), steps, dependencySteps);
 });
 
@@ -119,6 +122,10 @@ ipcMain.handle('playwright:record', async (_event, startUrl: string) => {
 
 ipcMain.handle('playwright:augment', async (_event, playwrightCode: string) => {
   return augmentRecordedSteps(playwrightCode);
+});
+
+ipcMain.handle('playwright:recordBuilderSteps', async (_event, startUrl: string) => {
+  return recordBuilderSteps(startUrl);
 });
 
 ipcMain.handle('playwright:heal', async (_event, log: string) => {
@@ -158,6 +165,10 @@ ipcMain.handle('agent:ai-test', async (event, req: AiTestRequest) => {
 
 ipcMain.handle('agent:ai-heal', async (event, req: AiHealRequest) => {
   return runAiHeal(req, (line) => event.sender.send('playwright:progress', line));
+});
+
+ipcMain.handle('agent:ai-chat', async (event, req: AiChatRequest) => {
+  return runAiChat(req, (line) => event.sender.send('playwright:progress', line));
 });
 
 ipcMain.handle('agent:ai-cancel', () => {

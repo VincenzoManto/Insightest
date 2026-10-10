@@ -82,6 +82,16 @@ export interface ResilientStepMeta {
   tagHint?: string;
 }
 
+export interface RecordedBuilderStep {
+  action: string;
+  selectors: Partial<Record<'xpath' | 'generalSelector' | 'attrSelector' | 'testIdSelector' | 'id' | 'text', string>>;
+  value: string;
+  valueIsNumber: boolean;
+  causesNavigation: boolean;
+  textHint?: string;
+  tagHint?: string;
+}
+
 /** A step the deterministic healer could not fix, sent to the AI with the page snapshot taken at the failure. */
 export interface AiHealStep {
   t: number;
@@ -99,6 +109,9 @@ export interface AiHealRequest {
   testName: string;
   baseUrl?: string | null;
   repoPath?: string | null;
+  /** The target's prerequisite chain (oldest first), as Playwright Builder code: the AI's own browser starts
+   * blank, so it must replay these itself before reaching the page the failing step runs on. */
+  prerequisites?: { name: string; code: string }[];
   steps: AiHealStep[];
 }
 
@@ -111,8 +124,55 @@ export interface AiHealFix {
   why?: string;
 }
 
+/** Raised instead of a fix when Claude can't tell what the right action is (ambiguous step, the app visibly
+ * changed, the test itself looks wrong) rather than guess a selector that merely happens to exist. */
+export interface AiHealQuestion {
+  t: number;
+  i: number;
+  question: string;
+  /** data: URI of what Claude was looking at, if it managed to take a screenshot. */
+  screenshot?: string | null;
+}
+
 export interface AiHealResult {
   fixes: AiHealFix[];
+  questions: AiHealQuestion[];
+  log: string;
+  exitCode: number | null;
+  cancelled: boolean;
+}
+
+export interface AiChatTurn {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+export interface AiChatRequest {
+  /** Prior turns of this conversation (oldest first), not including `instruction`. */
+  history: AiChatTurn[];
+  /** The user's latest message. */
+  instruction: string;
+  baseUrl?: string | null;
+  repoPath?: string | null;
+  projectId?: number | null;
+}
+
+export interface AiChatQuestion {
+  text: string;
+  /** data: URI of a screenshot Claude took to illustrate the question, if any. */
+  screenshot?: string | null;
+}
+
+export interface AiChatResult {
+  /** `question`: needs clarification. `plan`: a plan is proposed, waiting for confirmation. `code`: the test is ready. */
+  status: 'question' | 'plan' | 'code';
+  message?: string;
+  questions: AiChatQuestion[];
+  plan: string[];
+  /** Short descriptive name for the test, set together with `code`. */
+  name: string | null;
+  code: string | null;
+  dependsOn: string | null;
   log: string;
   exitCode: number | null;
   cancelled: boolean;
@@ -125,9 +185,10 @@ export interface InsightestBridge {
     clear: () => Promise<void>;
   };
   playwright: {
-    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => Promise<RunResult>;
+    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean; dbConnectionString?: string | null }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => Promise<RunResult>;
     record: (startUrl: string) => Promise<string | null>;
     augment: (playwrightCode: string) => Promise<ResilientStepMeta[]>;
+    recordBuilderSteps: (startUrl: string) => Promise<RecordedBuilderStep[] | null>;
     heal: (log: string) => Promise<string | null>;
     baseline: (projectId: number, baseUrl: string, tests: { id: number; playwright_code: string }[]) => Promise<BaselineResult>;
     baselineExists: (projectId: number) => Promise<boolean>;
@@ -142,6 +203,7 @@ export interface InsightestBridge {
     aiStatus: () => Promise<AiTestStatus>;
     aiTest: (req: AiTestRequest) => Promise<AiTestResult>;
     aiHeal: (req: AiHealRequest) => Promise<AiHealResult>;
+    aiChat: (req: AiChatRequest) => Promise<AiChatResult>;
     aiCancel: () => Promise<boolean>;
   };
   i18n: {

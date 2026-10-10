@@ -260,6 +260,38 @@ export interface AiFix {
   why?: string;
 }
 
+export interface AiQuestion {
+  t: number;
+  i: number;
+  question: string;
+  screenshot?: string | null;
+}
+
+/** A step the AI couldn't fix OR decided not to guess on, with the question it's asking the user instead
+ * (and, if it took one, a screenshot of what it was looking at). Purely informational: nothing here is applied
+ * to the test, the user reads it and fixes the step by hand (or answers by editing/rerunning) if they want to. */
+export interface HealQuestion {
+  testId: number;
+  testName: string;
+  stepKey: string;
+  stepNumber: number;
+  actionLabel: string;
+  question: string;
+  screenshot?: string | null;
+}
+
+/** Attaches step identity (test, position, action) to each of the AI's questions, matching them against the same
+ * `unresolved` list the AI was given -- a question about a (t,i) that isn't actually unresolved is dropped. */
+export function questionsFromAi(questions: AiQuestion[], unresolved: UnresolvedStep[]): HealQuestion[] {
+  const out: HealQuestion[] = [];
+  for (const q of questions) {
+    const target = unresolved.find((u) => u.t === q.t && u.i === q.i);
+    if (!target) continue;
+    out.push({ testId: target.testId, testName: target.testName, stepKey: target.stepKey, stepNumber: target.stepNumber, actionLabel: target.actionLabel, question: q.question, screenshot: q.screenshot });
+  }
+  return out;
+}
+
 /** The AI's structured answer, expressed as the same events the deterministic healer emits (one path for both). */
 export function eventsFromAiFixes(fixes: AiFix[], unresolved: UnresolvedStep[]): HealEvent[] {
   const out: HealEvent[] = [];

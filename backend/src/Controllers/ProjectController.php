@@ -3,6 +3,7 @@
 namespace App\Controllers;
 
 use App\Authz;
+use App\Crypto\SecretBox;
 use App\Database;
 use App\HttpException;
 use App\Request;
@@ -12,6 +13,25 @@ use App\Validator;
 final class ProjectController
 {
     private const SELECTOR_KEYS = ['xpath', 'generalSelector', 'text', 'id', 'testIdSelector', 'attrSelector'];
+
+    /** Encrypted `db_connection_string` for storage, or null to leave/clear it unset. */
+    private static function dbConnectionString(array $body): ?string
+    {
+        $value = $body['db_connection_string'] ?? null;
+        if ($value === null || $value === '') {
+            return null;
+        }
+        return SecretBox::encrypt((string) $value);
+    }
+
+    /** Strips the encrypted secret from a project row before it is ever sent back to a client,
+     * replacing it with a boolean the UI can use to show "configured" without exposing it. */
+    private static function redact(array $project): array
+    {
+        $project['has_db_connection'] = !empty($project['db_connection_string']);
+        unset($project['db_connection_string']);
+        return $project;
+    }
 
     /** Validated `selector_priority` (JSON-encoded ordered list of selector kinds), or null for "use the default". */
     private static function selectorPriority(array $body): ?string
@@ -42,7 +62,7 @@ final class ProjectController
 
         $stmt = Database::pdo()->prepare('SELECT * FROM projects WHERE org_id = ? ORDER BY created_at DESC');
         $stmt->execute([$orgId]);
-        Response::json(['projects' => $stmt->fetchAll()]);
+        Response::json(['projects' => array_map([self::class, 'redact'], $stmt->fetchAll())]);
     }
 
     public static function create(Request $req): void
@@ -54,10 +74,11 @@ final class ProjectController
         $baseUrl = isset($req->body['base_url']) && $req->body['base_url'] !== '' ? (string) $req->body['base_url'] : null;
         $repoPath = isset($req->body['repo_path']) && $req->body['repo_path'] !== '' ? (string) $req->body['repo_path'] : null;
         $selectorPriority = self::selectorPriority($req->body);
+        $dbConnectionString = self::dbConnectionString($req->body);
         $pdo = Database::pdo();
-        $pdo->prepare('INSERT INTO projects (org_id, name, base_url, repo_path, selector_priority) VALUES (?, ?, ?, ?, ?)')->execute([$orgId, $req->body['name'], $baseUrl, $repoPath, $selectorPriority]);
+        $pdo->prepare('INSERT INTO projects (org_id, name, base_url, repo_path, selector_priority, db_connection_string) VALUES (?, ?, ?, ?, ?, ?)')->execute([$orgId, $req->body['name'], $baseUrl, $repoPath, $selectorPriority, $dbConnectionString]);
 
-        Response::json(['id' => (int) $pdo->lastInsertId(), 'org_id' => $orgId, 'name' => $req->body['name'], 'base_url' => $baseUrl, 'repo_path' => $repoPath, 'selector_priority' => $selectorPriority], 201);
+        Response::json(['id' => (int) $pdo->lastInsertId(), 'org_id' => $orgId, 'name' => $req->body['name'], 'base_url' => $baseUrl, 'repo_path' => $repoPath, 'selector_priority' => $selectorPriority, 'has_db_connection' => $dbConnectionString !== null], 201);
     }
 
     public static function show(Request $req): void
@@ -71,7 +92,7 @@ final class ProjectController
         if (!$project) {
             throw new HttpException('Project not found', 404);
         }
-        Response::json($project);
+        Response::json(self::redact($project));
     }
 
     public static function update(Request $req): void
@@ -90,6 +111,12 @@ final class ProjectController
             $pdo->prepare('UPDATE projects SET selector_priority = ? WHERE id = ?')
                 ->execute([self::selectorPriority($req->body), $projectId]);
         }
+        // Same pattern: only touched when sent, and an empty string clears it (the UI never has the
+        // plaintext to resend unless the user retyped it, so omitting the field keeps it unchanged).
+        if (array_key_exists('db_connection_string', $req->body)) {
+            $pdo->prepare('UPDATE projects SET db_connection_string = ? WHERE id = ?')
+                ->execute([self::dbConnectionString($req->body), $projectId]);
+        }
 
         Response::json(['ok' => true]);
     }
@@ -101,6 +128,22 @@ final class ProjectController
 
         Database::pdo()->prepare('DELETE FROM projects WHERE id = ?')->execute([$projectId]);
         Response::json(['ok' => true]);
+    }
+
+    /** Decrypted connection string, fetched by the desktop app only right before running a test that
+     * uses the "DB" action -- never included in the normal project list/show responses. */
+    public static function dbSecret(Request $req): void
+    {
+        $projectId = (int) $req->params['projectId'];
+        Authz::requireProjectRole($projectId, $req->user['id']);
+
+        $stmt = Database::pdo()->prepare('SELECT db_connection_string FROM projects WHERE id = ?');
+        $stmt->execute([$projectId]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            throw new HttpException('Project not found', 404);
+        }
+        Response::json(['connection_string' => SecretBox::decrypt($row['db_connection_string'])]);
     }
 
     /** Projects the user can open only through a direct project invitation (no membership in the parent org). */
@@ -115,7 +158,7 @@ final class ProjectController
              ORDER BY p.created_at DESC'
         );
         $stmt->execute([$req->user['id']]);
-        Response::json(['projects' => $stmt->fetchAll()]);
+        Response::json(['projects' => array_map([self::class, 'redact'], $stmt->fetchAll())]);
     }
 
     public static function members(Request $req): void

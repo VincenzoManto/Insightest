@@ -46,6 +46,37 @@ export interface AiTestResult {
   cancelled: boolean;
 }
 
+export interface AiChatTurn {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+export interface AiChatRequest {
+  history: AiChatTurn[];
+  instruction: string;
+  baseUrl?: string | null;
+  repoPath?: string | null;
+  projectId?: number | null;
+}
+
+export interface AiChatQuestion {
+  text: string;
+  screenshot?: string | null;
+}
+
+export interface AiChatResult {
+  status: 'question' | 'plan' | 'code';
+  message?: string;
+  questions: AiChatQuestion[];
+  plan: string[];
+  name: string | null;
+  code: string | null;
+  dependsOn: string | null;
+  log: string;
+  exitCode: number | null;
+  cancelled: boolean;
+}
+
 export interface McpSetupResult {
   ok: boolean;
   configPath: string;
@@ -61,6 +92,16 @@ export interface ResilientStepMeta {
   tagHint?: string;
 }
 
+export interface RecordedBuilderStep {
+  action: string;
+  selectors: Partial<Record<'xpath' | 'generalSelector' | 'attrSelector' | 'testIdSelector' | 'id' | 'text', string>>;
+  value: string;
+  valueIsNumber: boolean;
+  causesNavigation: boolean;
+  textHint?: string;
+  tagHint?: string;
+}
+
 /** Narrow, explicit surface exposed to the renderer (no raw ipcRenderer/fs/node access). */
 contextBridge.exposeInMainWorld('insightest', {
   auth: {
@@ -69,12 +110,14 @@ contextBridge.exposeInMainWorld('insightest', {
     clear: (): Promise<void> => ipcRenderer.invoke('auth:clear'),
   },
   playwright: {
-    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]): Promise<RunResult> =>
+    run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean; dbConnectionString?: string | null }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]): Promise<RunResult> =>
       ipcRenderer.invoke('playwright:run', playwrightCode, options, dependencyCodes, steps, dependencySteps),
     record: (startUrl: string): Promise<string | null> =>
       ipcRenderer.invoke('playwright:record', startUrl),
     augment: (playwrightCode: string): Promise<ResilientStepMeta[]> =>
       ipcRenderer.invoke('playwright:augment', playwrightCode),
+    recordBuilderSteps: (startUrl: string): Promise<RecordedBuilderStep[] | null> =>
+      ipcRenderer.invoke('playwright:recordBuilderSteps', startUrl),
     heal: (log: string): Promise<string | null> => ipcRenderer.invoke('playwright:heal', log),
     baseline: (
       projectId: number,
@@ -101,6 +144,7 @@ contextBridge.exposeInMainWorld('insightest', {
     aiStatus: (): Promise<AiTestStatus> => ipcRenderer.invoke('agent:ai-status'),
     aiTest: (req: AiTestRequest): Promise<AiTestResult> => ipcRenderer.invoke('agent:ai-test', req),
     aiHeal: (req: unknown): Promise<unknown> => ipcRenderer.invoke('agent:ai-heal', req),
+    aiChat: (req: AiChatRequest): Promise<AiChatResult> => ipcRenderer.invoke('agent:ai-chat', req),
     aiCancel: (): Promise<boolean> => ipcRenderer.invoke('agent:ai-cancel'),
   },
   i18n: {
