@@ -206,6 +206,10 @@ export interface InsightestBridge {
     aiChat: (req: AiChatRequest) => Promise<AiChatResult>;
     aiCancel: () => Promise<boolean>;
   };
+  app: {
+    version: () => Promise<string>;
+    uninstall: () => Promise<{ ok: boolean; message: string }>;
+  };
   i18n: {
     setLocale: (locale: string) => Promise<void>;
   };

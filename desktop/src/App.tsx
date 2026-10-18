@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { LayoutDashboard, FolderKanban, Building2, LogOut, ChevronsUpDown, Bell, History } from 'lucide-react';
 import { useAuth } from './state/AuthContext';
 import { useInvitations } from './state/InvitationsContext';
@@ -44,6 +44,10 @@ export function App(): React.ReactElement {
   // Which page of the open project is shown, and (when coming from the CI runs recap) the test to open on arrival.
   const [view, setView] = useState<'tests' | 'ci-runs'>('tests');
   const [openTestId, setOpenTestId] = useState<number | null>(null);
+  const [appVersion, setAppVersion] = useState('');
+  useEffect(() => {
+    window.insightest.app.version().then(setAppVersion).catch(() => {});
+  }, []);
   const { invitations, open: invitationsOpen, openInvitations, closeInvitations } = useInvitations();
 
   if (!ready) return <div className="content text-ink-muted">{t('Loading…')}</div>;
@@ -144,6 +148,19 @@ export function App(): React.ReactElement {
         <div className="mb-3">
           <LegalLinks dark />
         </div>
+
+        {appVersion && (
+          <div className="mb-3 flex items-center justify-between px-1 text-[11px] text-sidebar-text">
+            <span>v{appVersion}</span>
+            <button
+              type="button"
+              onClick={() => void window.insightest.app.uninstall()}
+              className="hover:text-white"
+            >
+              {t('Uninstall')}
+            </button>
+          </div>
+        )}
 
         <div className="flex items-center gap-2.5 rounded-xl border border-sidebar-border px-2.5 py-2">
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-accent-300 to-accent-600 text-xs font-bold text-ink-primary">

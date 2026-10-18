@@ -15,7 +15,12 @@ function base64EncodeUtf8(input: string): string {
 }
 
 export class ApiClient {
-  constructor(private baseUrl: string, private getToken: () => string | null) {}
+  constructor(
+    private baseUrl: string,
+    private getToken: () => string | null,
+    /** Called when a request that carried a token is rejected with 401 (expired or invalid session). */
+    private onUnauthorized?: () => void
+  ) {}
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const token = this.getToken();
@@ -38,6 +43,7 @@ export class ApiClient {
     const data = text ? JSON.parse(text) : {};
 
     if (!res.ok) {
+      if (res.status === 401 && token) this.onUnauthorized?.();
       throw new ApiError(data.error ?? `Request failed (${res.status})`, res.status);
     }
     return data as T;

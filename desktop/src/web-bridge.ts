@@ -42,6 +42,7 @@ const webBridge: InsightestBridge = {
     aiChat: desktopOnly,
     aiCancel: async () => false,
   },
+  app: { version: async () => '', uninstall: async () => ({ ok: false, message: 'desktop-only' }) },
   i18n: { setLocale: async () => {} },
   dialog: { pickFolder: async () => null },
   mcp: { setup: desktopOnly },

@@ -31,6 +31,7 @@ const it: Record<string, string> = {
   Projects: 'Progetti',
   Organizations: 'Organizzazioni',
   'Sign out': 'Esci',
+  Uninstall: 'Disinstalla',
   'Switch project': 'Cambia progetto',
   'Test automation': 'Test automation',
 

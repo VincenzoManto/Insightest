@@ -147,6 +147,10 @@ contextBridge.exposeInMainWorld('insightest', {
     aiChat: (req: AiChatRequest): Promise<AiChatResult> => ipcRenderer.invoke('agent:ai-chat', req),
     aiCancel: (): Promise<boolean> => ipcRenderer.invoke('agent:ai-cancel'),
   },
+  app: {
+    version: (): Promise<string> => ipcRenderer.invoke('app:version'),
+    uninstall: (): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('app:uninstall'),
+  },
   i18n: {
     setLocale: (locale: string): Promise<void> => ipcRenderer.invoke('i18n:set-locale', locale),
   },

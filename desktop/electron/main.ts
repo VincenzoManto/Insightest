@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { spawn } from 'child_process';
 import { resolveNodeModule } from './runnerCore';
 import { setMessagesLocale } from './messages';
@@ -175,10 +176,21 @@ ipcMain.handle('agent:ai-cancel', () => {
   return cancelAiTestRequest();
 });
 
+/** playwright-core can be nested under playwright/ or @playwright/test/ depending on how npm laid out the install. */
+function resolvePlaywrightCore(): string {
+  const root = app.getAppPath();
+  const candidates = [
+    resolveNodeModule(root, 'playwright-core'),
+    path.join(root, 'node_modules', 'playwright', 'node_modules', 'playwright-core'),
+    path.join(root, 'node_modules', '@playwright', 'test', 'node_modules', 'playwright-core'),
+  ];
+  return candidates.find((c) => fs.existsSync(path.join(c, 'cli.js'))) ?? candidates[0];
+}
+
 /** Whether the Chromium build Playwright drives is present on this machine. */
 ipcMain.handle('browser:status', () => {
   try {
-    const { chromium } = require('playwright-core') as typeof import('playwright-core');
+    const { chromium } = require(resolvePlaywrightCore()) as typeof import('playwright-core');
     return fs.existsSync(chromium.executablePath());
   } catch {
     return false;
@@ -189,7 +201,7 @@ ipcMain.handle('browser:status', () => {
  * no npx, npm or system Node needed on the user's machine. */
 ipcMain.handle('browser:install', (event) => {
   return new Promise<{ ok: boolean; output: string }>((resolve) => {
-    const cli = resolveNodeModule(app.getAppPath(), path.join('playwright-core', 'cli.js'));
+    const cli = path.join(resolvePlaywrightCore(), 'cli.js');
     const child = spawn(process.execPath, [cli, 'install', 'chromium'], {
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     });
@@ -205,6 +217,57 @@ ipcMain.handle('browser:install', (event) => {
     child.on('error', (err) => resolve({ ok: false, output: err.message }));
     child.on('close', (code) => resolve({ ok: code === 0, output }));
   });
+});
+
+ipcMain.handle('app:version', () => app.getVersion());
+
+/** Per-user install folder created by bin/insightest.js; null when running from a dev checkout or elsewhere. */
+function managedInstallDir(): string | null {
+  const dir =
+    process.platform === 'win32'
+      ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Insightest')
+      : path.join(os.homedir(), '.insightest');
+  const appPath = path.resolve(app.getAppPath());
+  return appPath.toLowerCase().startsWith(path.resolve(dir).toLowerCase() + path.sep) ? dir : null;
+}
+
+/** Removes the shortcuts and the install folder. The folder is deleted by a detached helper after the app quits. */
+ipcMain.handle('app:uninstall', async () => {
+  const dir = managedInstallDir();
+  if (!dir) return { ok: false, message: 'not-managed' };
+  const win = BrowserWindow.getFocusedWindow();
+  const opts = {
+    type: 'warning' as const,
+    buttons: ['Uninstall', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Uninstall Insightest',
+    message: 'Uninstall Insightest?',
+    detail: 'The app and its shortcuts will be removed. Your account data stays on the server.',
+  };
+  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  if (response !== 0) return { ok: false, message: 'cancelled' };
+  if (process.platform === 'win32') {
+    const lnk = 'Insightest.lnk';
+    const paths = [
+      path.join(os.homedir(), 'Desktop', lnk),
+      path.join(process.env.OneDrive || '', 'Desktop', lnk),
+      path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs', lnk),
+    ];
+    for (const p of paths) {
+      try {
+        fs.rmSync(p, { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+    const cmd = `ping -n 4 127.0.0.1 >nul & rmdir /s /q "${dir}"`;
+    spawn('cmd.exe', ['/c', cmd], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  } else {
+    spawn('sh', ['-c', `sleep 3; rm -rf "${dir}"`], { detached: true, stdio: 'ignore' }).unref();
+  }
+  app.quit();
+  return { ok: true, message: '' };
 });
 
 ipcMain.handle('i18n:set-locale', (_event, locale: string) => {

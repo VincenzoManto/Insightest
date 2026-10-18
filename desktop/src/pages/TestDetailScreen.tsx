@@ -290,7 +290,7 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
   const [runs, setRuns] = useState<TestRun[]>([]);
   const [lastRunDetail, setLastRunDetail] = useState<TestRunDetail | null>(null);
   const [running, setRunning] = useState(false);
-  const [headed, setHeaded] = useState(false);
+  const [headed, setHeaded] = useState(true);
   const [betweenActionMs, setBetweenActionMs] = useState(400);
   const [lastLog, setLastLog] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

@@ -41,7 +41,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     });
   }, []);
 
-  const api = useMemo(() => new ApiClient(apiBaseUrl, () => token), [apiBaseUrl, token]);
+  // An expired/invalid token drops the session; App then renders the login screen.
+  const api = useMemo(
+    () =>
+      new ApiClient(
+        apiBaseUrl,
+        () => token,
+        () => {
+          void window.insightest.auth.clear();
+          setToken(null);
+          setUser(null);
+        }
+      ),
+    [apiBaseUrl, token]
+  );
 
   const persist = useCallback(async (next: StoredAuth) => {
     await window.insightest.auth.save(JSON.stringify(next));
