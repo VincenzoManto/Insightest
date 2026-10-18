@@ -22,6 +22,18 @@ export type StepAction =
   | 'clearInput'
   | 'wait'
   | 'resize'
+  | 'back'
+  | 'forward'
+  | 'refresh'
+  | 'wheel'
+  | 'dragAndDrop'
+  | 'awaitText'
+  | 'awaitNetworkStatus'
+  | 'fullScreenshot'
+  | 'alert'
+  | 'prompt'
+  | 'confirm'
+  | 'customAction'
   | 'DB'
   | 'raw';
 
@@ -33,7 +45,10 @@ export type SelectorKey = (typeof SELECTOR_KEYS)[number];
 export type StepSelectors = Record<SelectorKey, string>;
 
 /** Actions the editor can create/convert between, in the order shown in the Action dropdown. */
-export const EDITABLE_ACTIONS: StepAction[] = ['load', 'click', 'doubleClick', 'rightClick', 'hover', 'fill', 'type', 'select', 'select2', 'keydown', 'clearInput', 'wait', 'resize', 'DB'];
+export const EDITABLE_ACTIONS: StepAction[] = [
+  'load', 'click', 'doubleClick', 'rightClick', 'hover', 'fill', 'type', 'select', 'select2', 'keydown', 'clearInput', 'wait', 'resize',
+  'back', 'forward', 'refresh', 'wheel', 'dragAndDrop', 'awaitText', 'awaitNetworkStatus', 'fullScreenshot', 'alert', 'prompt', 'confirm', 'customAction', 'DB',
+];
 
 export const ACTION_LABEL: Record<StepAction, string> = {
   load: 'Load',
@@ -49,6 +64,18 @@ export const ACTION_LABEL: Record<StepAction, string> = {
   clearInput: 'Clear',
   wait: 'Wait',
   resize: 'Resize',
+  back: 'Go back',
+  forward: 'Go forward',
+  refresh: 'Reload page',
+  wheel: 'Scroll',
+  dragAndDrop: 'Drag and drop',
+  awaitText: 'Wait for text',
+  awaitNetworkStatus: 'Wait for network',
+  fullScreenshot: 'Screenshot',
+  alert: 'Accept alert',
+  prompt: 'Answer prompt',
+  confirm: 'Answer confirm',
+  customAction: 'Custom code',
   DB: 'Query DB',
   raw: 'Code',
 };
@@ -74,8 +101,37 @@ export function valueLabel(action: StepAction): string | null {
       return 'Milliseconds';
     case 'resize':
       return 'Width';
+    case 'wheel':
+      return 'Horizontal scroll (px)';
+    case 'dragAndDrop':
+      return 'From (x, y)';
+    case 'awaitText':
+      return 'Text';
+    case 'awaitNetworkStatus':
+      return 'URL (or part of it)';
+    case 'prompt':
+      return 'Answer';
+    case 'confirm':
+      return 'Accept (true / false)';
+    case 'customAction':
+      return 'JavaScript code';
     case 'DB':
       return 'SQL query';
+    default:
+      return null;
+  }
+}
+/** Actions with a second value (resize height, scroll Y, drop point, HTTP status). */
+export function value2Label(action: StepAction): string | null {
+  switch (action) {
+    case 'resize':
+      return 'Height';
+    case 'wheel':
+      return 'Vertical scroll (px)';
+    case 'dragAndDrop':
+      return 'To (x, y)';
+    case 'awaitNetworkStatus':
+      return 'HTTP status';
     default:
       return null;
   }
@@ -91,9 +147,10 @@ export interface EditableStep {
   selectors: StepSelectors;
   /** Adds/removes `:visible` on the CSS selectors (xpath/text are unaffected). */
   visible: boolean;
-  /** fill/type/select value, keydown key, select2 option, load url, wait ms, resize width. */
+  /** fill/type/select value, keydown key, select2 option, load url, wait ms, resize width, scroll X, drag start "x,y",
+   * awaited text / url, prompt answer, confirm "true"/"false", custom code. */
   value: string;
-  /** resize height. */
+  /** resize height, scroll Y, drop point "x,y", awaited HTTP status. */
   value2: string;
   /** select2: pick the option by position instead of by text. */
   valueIsNumber: boolean;
@@ -107,6 +164,10 @@ export interface EditableStep {
   /** Recorded metadata the editor doesn't expose but must not lose. */
   textHint?: string;
   tagHint?: string;
+  /** Further recorded selectors (engine fallbacks after the ones above). */
+  secondarySelectors?: string[];
+  /** select2: value attribute of the recorded option (`value` holds its text, which is what the engine matches). */
+  optionValue?: string;
   /** Verbatim source line for 'raw' steps (comments, TODOs, hand-written code). */
   raw?: string;
   /** True when the runner will count this line as selector-bearing (keeps steps_json aligned even for raw lines). */
@@ -143,8 +204,8 @@ export function newStep(action: StepAction = 'click'): EditableStep {
     action,
     selectors: emptySelectors(),
     visible: true,
-    value: action === 'wait' ? '1000' : action === 'resize' ? '1280' : '',
-    value2: action === 'resize' ? '720' : '',
+    value: action === 'wait' ? '1000' : action === 'resize' ? '1280' : action === 'wheel' ? '0' : action === 'dragAndDrop' ? '0,0' : action === 'confirm' ? 'true' : '',
+    value2: action === 'resize' ? '720' : action === 'wheel' ? '500' : action === 'dragAndDrop' ? '0,0' : action === 'awaitNetworkStatus' ? '200' : '',
     valueIsNumber: false,
     causesNavigation: false,
     enabled: true,
@@ -272,6 +333,41 @@ function stepFromCall(method: string, args: unknown[], meta: any, rawLine: strin
       step.value = str(args[0]);
       step.value2 = str(args[1]);
       break;
+    case 'back':
+    case 'forward':
+    case 'refresh':
+    case 'fullScreenshot':
+    case 'alert':
+      step.action = method;
+      break;
+    case 'wheel':
+      step.action = 'wheel';
+      step.value = str(args[0]);
+      step.value2 = str(args[1]);
+      break;
+    case 'dragAndDrop':
+      step.action = 'dragAndDrop';
+      step.value = `${str(args[0])},${str(args[1])}`;
+      step.value2 = `${str(args[2])},${str(args[3])}`;
+      break;
+    case 'awaitText':
+      step.action = 'awaitText';
+      step.value = str(args[2]);
+      break;
+    case 'awaitNetworkStatus':
+      step.action = 'awaitNetworkStatus';
+      step.value = str(args[0]);
+      step.value2 = str(args[1]);
+      break;
+    case 'prompt':
+    case 'customAction':
+      step.action = method;
+      step.value = str(args[0]);
+      break;
+    case 'confirm':
+      step.action = 'confirm';
+      step.value = args[0] === false ? 'false' : 'true';
+      break;
     case 'click':
     case 'doubleClick':
     case 'rightClick':
@@ -325,6 +421,8 @@ function stepFromCall(method: string, args: unknown[], meta: any, rawLine: strin
   if (meta && typeof meta === 'object') {
     if (typeof meta.textHint === 'string') step.textHint = meta.textHint;
     if (typeof meta.tagHint === 'string') step.tagHint = meta.tagHint;
+    if (Array.isArray(meta.secondarySelectors)) step.secondarySelectors = meta.secondarySelectors.filter((s: unknown) => typeof s === 'string');
+    if (typeof meta.optionValue === 'string') step.optionValue = meta.optionValue;
     if (meta.timeout) step.timeout = String(meta.timeout);
     if (meta.waitBeforeMs) step.waitBeforeMs = String(meta.waitBeforeMs);
     step.skipOnFailure = meta.skipOnFailure === true;
@@ -416,6 +514,8 @@ function metaOf(step: EditableStep): Record<string, unknown> | null {
   if (Object.keys(byKey).length) meta.byKey = byKey;
   if (step.textHint) meta.textHint = step.textHint;
   if (step.tagHint) meta.tagHint = step.tagHint;
+  if (step.secondarySelectors?.length) meta.secondarySelectors = step.secondarySelectors;
+  if (step.action === 'select2' && step.optionValue !== undefined) meta.optionValue = step.optionValue;
   const timeout = Number(step.timeout);
   if (timeout > 0) meta.timeout = timeout;
   const wait = Number(step.waitBeforeMs);
@@ -435,6 +535,28 @@ function callLine(step: EditableStep, priority: readonly string[]): string {
       return `await pw.wait(${num(step.value, 0)});`;
     case 'resize':
       return `await pw.resize(${num(step.value, 1280)}, ${num(step.value2, 720)});`;
+    case 'back':
+    case 'forward':
+    case 'refresh':
+    case 'fullScreenshot':
+    case 'alert':
+      return `await pw.${step.action}();`;
+    case 'wheel':
+      return `await pw.wheel(${num(step.value, 0)}, ${num(step.value2, 0)});`;
+    case 'dragAndDrop': {
+      const [sx, sy] = step.value.split(',').map((v) => num(v, 0));
+      const [tx, ty] = step.value2.split(',').map((v) => num(v, 0));
+      return `await pw.dragAndDrop(${sx ?? 0}, ${sy ?? 0}, ${tx ?? 0}, ${ty ?? 0});`;
+    }
+    case 'awaitText':
+      return `await pw.awaitText(null, null, ${q(step.value)});`;
+    case 'awaitNetworkStatus':
+      return `await pw.awaitNetworkStatus(${q(step.value)}, ${num(step.value2, 200)});`;
+    case 'prompt':
+    case 'customAction':
+      return `await pw.${step.action}(${q(step.value)});`;
+    case 'confirm':
+      return `await pw.confirm(${step.value.trim().toLowerCase() !== 'false'});`;
     case 'click':
     case 'doubleClick':
     case 'rightClick':
@@ -497,11 +619,14 @@ export function serializeBuilderTest(parsed: ParsedBuilderTest, priority: readon
 export interface RecordedStepInput {
   action: string;
   selectors: Partial<StepSelectors>;
+  secondarySelectors?: string[];
   value: string;
+  value2?: string;
   valueIsNumber: boolean;
   causesNavigation: boolean;
   textHint?: string;
   tagHint?: string;
+  optionValue?: string;
 }
 
 /** Turns a fresh recording into an editable builder test, ready for `serializeBuilderTest()`. */
@@ -509,12 +634,17 @@ export function builderTestFromRecordedSteps(recorded: RecordedStepInput[], test
   const steps: EditableStep[] = recorded.map((r) => {
     const action = (EDITABLE_ACTIONS as string[]).includes(r.action) ? (r.action as StepAction) : 'click';
     const step = newStep(action);
-    if (hasSelector(action)) step.selectors = { ...emptySelectors(), ...r.selectors };
+    if (hasSelector(action)) {
+      step.selectors = { ...emptySelectors(), ...r.selectors };
+      if (r.secondarySelectors?.length) step.secondarySelectors = r.secondarySelectors;
+    }
     step.value = r.value;
+    if (r.value2 !== undefined) step.value2 = r.value2;
     step.valueIsNumber = r.valueIsNumber;
     step.causesNavigation = r.causesNavigation;
     step.textHint = r.textHint;
     step.tagHint = r.tagHint;
+    if (r.optionValue !== undefined) step.optionValue = r.optionValue;
     return step;
   });
   const safeName = testName.replace(/'/g, "\\'");
@@ -531,11 +661,17 @@ export function stepPrimaryLabel(step: EditableStep, priority: readonly string[]
   if (step.action === 'wait') return `${step.value || 0}ms`;
   if (step.action === 'resize') return `${step.value} × ${step.value2}`;
   if (step.action === 'DB') return `${step.dbMode === 'diff' ? 'diff' : 'snapshot'} "${step.dbSnapshotName || ''}"`;
+  if (step.action === 'wheel') return `${step.value || 0}, ${step.value2 || 0}`;
+  if (step.action === 'dragAndDrop') return `(${step.value}) → (${step.value2})`;
+  if (step.action === 'awaitNetworkStatus') return `${step.value2 || 200} ${step.value}`;
+  if (['awaitText', 'prompt', 'confirm', 'customAction'].includes(step.action)) return step.value || '—';
+  if (!hasSelector(step.action)) return '';
   return primarySelector(step, priority) || '—';
 }
 
 /** Value shown after the arrow in the step list (typed text, key, option...). */
 export function stepDetail(step: EditableStep): string | undefined {
+  if (step.action === 'select2' && step.value && step.optionValue !== undefined && step.optionValue !== step.value) return `${step.value} (${step.optionValue})`;
   if (['fill', 'type', 'select', 'select2', 'keydown'].includes(step.action) && step.value) return step.value;
   if (step.action === 'DB' && step.value) return step.value;
   return undefined;

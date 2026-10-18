@@ -7,6 +7,7 @@ import {
   canCauseNavigation,
   hasSelector,
   valueLabel,
+  value2Label,
   type EditableStep,
   type SelectorKey,
   type StepAction,
@@ -64,6 +65,7 @@ export function StepEditorDrawer({
   const isRaw = draft.action === 'raw';
   const withSelector = hasSelector(draft.action);
   const vLabel = valueLabel(draft.action);
+  const v2Label = value2Label(draft.action);
   const noSelector = withSelector && draft.action !== 'keydown' && Object.values(draft.selectors).every((v) => !v.trim());
 
   return (
@@ -106,9 +108,9 @@ export function StepEditorDrawer({
                     <input value={draft.value} onChange={(e) => set({ value: e.target.value })} className="w-full" />
                   </label>
                 )}
-                {draft.action === 'resize' && (
+                {v2Label && (
                   <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
-                    {t('Height')}
+                    {t(v2Label)}
                     <input value={draft.value2} onChange={(e) => set({ value2: e.target.value })} className="w-full" />
                   </label>
                 )}

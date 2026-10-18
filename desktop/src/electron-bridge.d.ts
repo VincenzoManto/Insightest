@@ -85,11 +85,16 @@ export interface ResilientStepMeta {
 export interface RecordedBuilderStep {
   action: string;
   selectors: Partial<Record<'xpath' | 'generalSelector' | 'attrSelector' | 'testIdSelector' | 'id' | 'text', string>>;
+  /** Further recorded selectors (form/accessibility/href/anchored xpath...), engine fallbacks. */
+  secondarySelectors?: string[];
   value: string;
+  value2?: string;
   valueIsNumber: boolean;
   causesNavigation: boolean;
   textHint?: string;
   tagHint?: string;
+  /** select2: the chosen <option>'s value attribute (`value` holds its visible text). */
+  optionValue?: string;
 }
 
 /** A step the deterministic healer could not fix, sent to the AI with the page snapshot taken at the failure. */
@@ -186,7 +191,6 @@ export interface InsightestBridge {
   };
   playwright: {
     run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean; dbConnectionString?: string | null }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => Promise<RunResult>;
-    record: (startUrl: string) => Promise<string | null>;
     augment: (playwrightCode: string) => Promise<ResilientStepMeta[]>;
     recordBuilderSteps: (startUrl: string) => Promise<RecordedBuilderStep[] | null>;
     heal: (log: string) => Promise<string | null>;

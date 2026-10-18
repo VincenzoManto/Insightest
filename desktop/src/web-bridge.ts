@@ -22,7 +22,6 @@ const webBridge: InsightestBridge = {
   },
   playwright: {
     run: desktopOnly,
-    record: desktopOnly,
     augment: desktopOnly,
     recordBuilderSteps: desktopOnly,
     heal: desktopOnly,

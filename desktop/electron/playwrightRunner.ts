@@ -12,4 +12,5 @@ initRunnerPaths({
 });
 
 export * from './runnerCore';
+export * from './recorder';
 

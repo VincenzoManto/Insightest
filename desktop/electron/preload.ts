@@ -95,11 +95,16 @@ export interface ResilientStepMeta {
 export interface RecordedBuilderStep {
   action: string;
   selectors: Partial<Record<'xpath' | 'generalSelector' | 'attrSelector' | 'testIdSelector' | 'id' | 'text', string>>;
+  /** Further recorded selectors (form/accessibility/href/anchored xpath...), engine fallbacks. */
+  secondarySelectors?: string[];
   value: string;
+  value2?: string;
   valueIsNumber: boolean;
   causesNavigation: boolean;
   textHint?: string;
   tagHint?: string;
+  /** select2: the chosen <option>'s value attribute (`value` holds its visible text). */
+  optionValue?: string;
 }
 
 /** Narrow, explicit surface exposed to the renderer (no raw ipcRenderer/fs/node access). */
@@ -112,8 +117,6 @@ contextBridge.exposeInMainWorld('insightest', {
   playwright: {
     run: (playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean; dbConnectionString?: string | null }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]): Promise<RunResult> =>
       ipcRenderer.invoke('playwright:run', playwrightCode, options, dependencyCodes, steps, dependencySteps),
-    record: (startUrl: string): Promise<string | null> =>
-      ipcRenderer.invoke('playwright:record', startUrl),
     augment: (playwrightCode: string): Promise<ResilientStepMeta[]> =>
       ipcRenderer.invoke('playwright:augment', playwrightCode),
     recordBuilderSteps: (startUrl: string): Promise<RecordedBuilderStep[] | null> =>

@@ -7,7 +7,6 @@ import { resolveNodeModule } from './runnerCore';
 import { setMessagesLocale } from './messages';
 import {
   runPlaywrightTest,
-  recordPlaywrightTest,
   augmentRecordedSteps,
   recordBuilderSteps,
   explainFailure,
@@ -115,10 +114,6 @@ ipcMain.handle('auth:clear', () => {
 
 ipcMain.handle('playwright:run', async (event, playwrightCode: string, options?: { headed?: boolean; betweenActionMs?: number; selectorPriority?: string[]; heal?: boolean; dbConnectionString?: string | null }, dependencyCodes?: string[], steps?: ResilientStepMeta[] | null, dependencySteps?: (ResilientStepMeta[] | null)[]) => {
   return runPlaywrightTest(playwrightCode, options, dependencyCodes, (line) => event.sender.send('playwright:progress', line), steps, dependencySteps);
-});
-
-ipcMain.handle('playwright:record', async (_event, startUrl: string) => {
-  return recordPlaywrightTest(startUrl);
 });
 
 ipcMain.handle('playwright:augment', async (_event, playwrightCode: string) => {

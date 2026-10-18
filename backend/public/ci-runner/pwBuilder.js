@@ -680,7 +680,7 @@ class PlaywrightBuilder {
     value = typeof value === 'string' ? this.clean(value) : value;
     let lastError;
     for (let attempt = 1; attempt <= 2; attempt++) {
-      if (!(await this._do('Click', selector, (l) => l.click(), meta))) return;
+      if (!(await this._do('Click', selector, async (l, extra) => (await this._select2Trigger(l)).click(extra), meta))) return;
       try {
         await this.page.locator('.select2-container--open').first().waitFor({ state: 'visible', timeout: 5000, ...options });
         const option = await this._select2Option(value);
@@ -699,6 +699,14 @@ class PlaywrightBuilder {
     }
     throw lastError;
   };
+
+  /** A select2 step's selector may point at the widget or at its (hidden) <select> -- e.g. `[data-test="x"]`, which
+   * only the <select> carries: then the thing to click is the select2 selection box rendered right after it. */
+  async _select2Trigger(l) {
+    const isSelect = await l.evaluate((el) => el.tagName === 'SELECT').catch(() => false);
+    if (!isSelect) return l;
+    return l.locator('xpath=following-sibling::*[contains(concat(" ", normalize-space(@class), " "), " select2-container ")][1]//*[contains(concat(" ", normalize-space(@class), " "), " select2-selection ")]').first();
+  }
 
   /** How alike two labels are, 0..1: word-prefix containment ("FORLI" ~ "Forlì (FC)") or edit distance. */
   _textScore(a, b) {
@@ -721,7 +729,7 @@ class PlaywrightBuilder {
     const ref = this._ref(meta);
     try {
       this.page.setDefaultTimeout(4000);
-      if (!(await this._do('Click', selector, (l) => l.click(), meta))) return false;
+      if (!(await this._do('Click', selector, async (l, extra) => (await this._select2Trigger(l)).click(extra), meta))) return false;
       await this.page.locator('.select2-container--open').first().waitFor({ state: 'visible', timeout: 5000 });
       const search = this.page.locator('.select2-container--open .select2-search__field').last();
       const hasSearch = await search.isVisible().catch(() => false);
