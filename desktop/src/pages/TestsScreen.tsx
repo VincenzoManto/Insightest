@@ -18,6 +18,7 @@ import {
   Trash2,
   Lock,
   Sparkles,
+  Download,
 } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import { t } from '../i18n';
@@ -26,6 +27,9 @@ import { TestDetailScreen } from './TestDetailScreen';
 import { NewTestForm } from './NewTestForm';
 import { BrowserSetupCard } from '../components/BrowserSetupCard';
 import { TestGenChatPanel } from '../components/TestGenChatPanel';
+import { parseSelectorPriority } from '../components/SelectorPriorityEditor';
+import { compileTestToVanilla, resolveDependencyChain, slugifyFileName, vanillaPlaywrightConfig } from '../exportVanilla';
+import { createZip, downloadBlob } from '../zip';
 
 type StatusFilter = 'all' | 'passed' | 'failed' | 'never';
 type TriggerFilter = 'all' | 'desktop' | 'ci';
@@ -293,6 +297,37 @@ export function TestsScreen({ project, initialTestId = null }: { project: Projec
   const [baselineReady, setBaselineReady] = useState<boolean | null>(null);
   const [buildingBaseline, setBuildingBaseline] = useState(false);
   const [baselineMessage, setBaselineMessage] = useState<string | null>(null);
+  const [exportingProject, setExportingProject] = useState(false);
+
+  /** Compiles every test in the project into standalone vanilla Playwright files and downloads them as one .zip. */
+  async function exportProjectVanilla(): Promise<void> {
+    setExportingProject(true);
+    setError(null);
+    try {
+      const details = await Promise.all(tests.map((test) => api.get<TestDetail>(`/tests/${test.id}`)));
+      const byId = new Map(details.map((d) => [d.id, d]));
+      const priority = parseSelectorPriority(project.selector_priority);
+      const usedNames = new Set<string>();
+      const files = await Promise.all(
+        details.map(async (detail) => {
+          const dependencies = await resolveDependencyChain(detail, async (id) => byId.get(id) ?? (await api.get<TestDetail>(`/tests/${id}`)));
+          const code = compileTestToVanilla(detail, dependencies, priority);
+          let name = slugifyFileName(detail.name);
+          let unique = name;
+          let n = 2;
+          while (usedNames.has(unique)) unique = `${name}-${n++}`;
+          usedNames.add(unique);
+          return { path: `tests/${unique}.spec.ts`, content: code };
+        })
+      );
+      files.push({ path: 'playwright.config.ts', content: vanillaPlaywrightConfig() });
+      downloadBlob(createZip(files), `${slugifyFileName(project.name)}-playwright.zip`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('Unknown error'));
+    } finally {
+      setExportingProject(false);
+    }
+  }
 
   async function refreshBaselineStatus(): Promise<void> {
     try {
@@ -526,6 +561,9 @@ export function TestsScreen({ project, initialTestId = null }: { project: Projec
           <div className="screen-subtitle truncate">{project.name}</div>
         </div>
         <div className="flex gap-2">
+          <button className="secondary" onClick={() => void exportProjectVanilla()} disabled={exportingProject || tests.length === 0} title={t('Downloads every test in this project as plain Playwright .spec.ts files, no insightest runtime required.')}>
+            <Download size={16} /> {exportingProject ? t('Exporting…') : t('Export Playwright')}
+          </button>
           <button className="secondary" onClick={() => setGeneratingChat(true)}>
             <Sparkles size={16} /> {t('Generate with Claude')}
           </button>

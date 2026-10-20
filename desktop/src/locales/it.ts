@@ -256,6 +256,12 @@ const it: Record<string, string> = {
   'Test code': 'Codice del test',
   'Hide code': 'Nascondi codice',
   'Show code': 'Mostra codice',
+  'Export Playwright': 'Esporta Playwright',
+  'Exporting…': 'Esportazione…',
+  'Downloads this test (and its prerequisites) as a plain Playwright .spec.ts file, no insightest runtime required.':
+    'Scarica questo test (con i suoi prerequisiti) come file .spec.ts in Playwright puro, senza il runtime di insightest.',
+  'Downloads every test in this project as plain Playwright .spec.ts files, no insightest runtime required.':
+    'Scarica tutti i test di questo progetto come file .spec.ts in Playwright puro, senza il runtime di insightest.',
   Executed: 'Eseguita',
   'Failed step': 'Fallita',
   'Not executed': 'Non eseguita',
@@ -263,6 +269,9 @@ const it: Record<string, string> = {
   'Steps of the last run': "Passaggi dell'ultima esecuzione",
   'Waiting for the first step…': 'In attesa del primo passaggio...',
   'Last local run log': 'Log ultima esecuzione locale',
+  'View log': 'Vedi log',
+  'Stuck on': 'Bloccato su',
+  'No log recorded for this run.': 'Nessun log registrato per questa esecuzione.',
   'Test notes': 'Note del test',
   'Add a note…': 'Aggiungi una nota...',
   'Save note': 'Salva nota',
@@ -403,6 +412,14 @@ const it: Record<string, string> = {
   'Timeout (ms)': 'Timeout (ms)',
   'default (8s → 15s → 20s)': 'predefinito (8s → 15s → 20s)',
   'Wait before (ms)': 'Attesa prima (ms)',
+  'Playwright options': 'Opzioni Playwright',
+  Force: 'Forza (force)',
+  "Skips Playwright's actionability checks (visible, stable, receives events, enabled) -- use when the element is covered, disabled-looking or otherwise blocked but the action should still happen":
+    'Salta i controlli di eseguibilità di Playwright (visibile, stabile, riceve eventi, abilitato) -- usalo quando l’elemento è coperto, sembra disabilitato o è comunque bloccato ma l’azione deve avvenire comunque',
+  'Other options (JSON)': 'Altre opzioni (JSON)',
+  'Merged into the Playwright call as-is (noWaitAfter, trial, position, modifiers, timeout…).': 'Vengono unite così come sono alla chiamata Playwright (noWaitAfter, trial, position, modifiers, timeout…).',
+  'Must be a JSON object, e.g. {"noWaitAfter": true}': 'Deve essere un oggetto JSON, es. {"noWaitAfter": true}',
+  'Invalid JSON': 'JSON non valido',
   'Causes navigation': 'Provoca navigazione',
   'After the action, wait for the page to load before the next step': 'Dopo l’azione, attende il caricamento della pagina prima del passo successivo',
   'Pick the option by position (number), not by text': 'Scegli l’opzione per posizione (numero), non per testo',
@@ -522,6 +539,8 @@ const it: Record<string, string> = {
   'No CI runs recorded yet. They appear here after the pipeline reports its results.':
     'Nessuna run CI registrata. Compariranno qui dopo che la pipeline avrà riportato i risultati.',
   'No test matches the search.': 'Nessun test corrisponde alla ricerca.',
+  'Delete this CI run': 'Elimina questa run CI',
+  'Delete this CI run ({n} tests)? This cannot be undone.': 'Eliminare questa run CI ({n} test)? L’azione non è reversibile.',
 };
 
 export default it;

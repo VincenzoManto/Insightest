@@ -69,6 +69,32 @@ final class RunController
         Response::json(['runs' => $rows]);
     }
 
+    /**
+     * Deletes a whole pipeline execution (every test_runs row the desktop grouped into one CI run
+     * card) in one go. Scoped to `$projectId` and `triggered_by = 'ci'` so the ids a client sends
+     * can never reach another project's rows or a desktop-triggered run.
+     */
+    public static function deleteCiRuns(Request $req): void
+    {
+        $projectId = (int) $req->params['projectId'];
+        Authz::requireProjectRole($projectId, $req->user['id'], ['owner', 'admin']);
+
+        $ids = array_values(array_unique(array_filter(array_map('intval', (array) ($req->body['ids'] ?? [])))));
+        if (!$ids) {
+            throw new HttpException('No run ids given', 422);
+        }
+
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = Database::pdo()->prepare(
+            "DELETE FROM test_runs
+             WHERE triggered_by = 'ci' AND id IN ($placeholders)
+               AND test_id IN (SELECT id FROM tests WHERE project_id = ?)"
+        );
+        $stmt->execute([...$ids, $projectId]);
+
+        Response::json(['ok' => true, 'deleted' => $stmt->rowCount()]);
+    }
+
     /** Called by either the desktop app (JWT) or the CI runner (API key) after a Playwright execution. */
     public static function create(Request $req): void
     {

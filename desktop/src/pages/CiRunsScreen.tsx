@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, CircleDot, RefreshCw, Search, Wand2, X, XCircle } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, CircleDot, RefreshCw, Search, Trash2, Wand2, Wrench, X, XCircle } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import type { CiRunRow, Folder, Project } from '../types';
 import { counts, filterGroups, folderPathOf, formatDuration, groupCiRuns, type CiRunGroup, type StatusFilter } from '../ciRuns';
 import { HealPanel } from '../components/HealPanel';
+import { getFailureReason, type FailureReason } from '../failureReason';
 import { formatDateTime, t } from '../i18n';
 
 // eslint-disable-next-line no-control-regex
@@ -65,6 +66,10 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
   const [logs, setLogs] = useState<Record<number, { loading: boolean; text: string }>>({});
   // Tests handed to the auto-heal panel (the failed ones of a run, or a single one).
   const [healIds, setHealIds] = useState<number[] | null>(null);
+  // Failure reason per run id, fetched in the background for failed rows currently expanded on screen
+  // (no click needed) -- caches by id so a row's log is only ever fetched once.
+  const [reasons, setReasons] = useState<Record<number, FailureReason | null>>({});
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
   async function load(): Promise<void> {
     setLoading(true);
@@ -94,6 +99,51 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
   const searching = query.trim() !== '' || status !== 'all';
   const shownResults = visible.reduce((sum, g) => sum + g.items.length, 0);
 
+  // Fetches the log of each failed row in an expanded group (same default-open rule as renderGroup
+  // below) so its "where it got stuck" reason shows up on its own, without the user clicking anything.
+  useEffect(() => {
+    const toFetch = visible
+      .flatMap((g, i) => ((open[g.key] ?? (searching || i === 0)) ? g.items : []))
+      .filter((r) => (r.status === 'failed' || r.status === 'error') && !(r.id in reasons))
+      .slice(0, 25);
+    if (toFetch.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (const row of toFetch) {
+        try {
+          const run = await api.get<{ log: string | null }>(`/tests/${row.test_id}/runs/${row.id}`);
+          if (cancelled) return;
+          setReasons((prev) => ({ ...prev, [row.id]: getFailureReason(run.log) }));
+        } catch {
+          if (cancelled) return;
+          setReasons((prev) => ({ ...prev, [row.id]: null }));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, open]);
+
+  /** Deletes every test_runs row behind one pipeline execution card -- not reversible. */
+  async function deleteGroup(group: CiRunGroup): Promise<void> {
+    if (!window.confirm(t('Delete this CI run ({n} tests)? This cannot be undone.', { n: group.items.length }))) return;
+    setDeletingKey(group.key);
+    setError(null);
+    try {
+      await api.delete(`/projects/${project.id}/ci-runs`, { ids: group.items.map((r) => r.id) });
+      setRows((prev) => {
+        const ids = new Set(group.items.map((r) => r.id));
+        return prev.filter((r) => !ids.has(r.id));
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('Unknown error'));
+    } finally {
+      setDeletingKey(null);
+    }
+  }
+
   async function toggleLog(row: CiRunRow): Promise<void> {
     if (logs[row.id]) {
       setLogs((prev) => {
@@ -119,27 +169,38 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
     const c = counts(group.items);
     return (
       <div key={group.key} className="card !p-0 overflow-hidden">
-        <button type="button" onClick={() => setOpen((prev) => ({ ...prev, [group.key]: !isOpen }))} className="!flex !w-full !flex-col !items-stretch !gap-2.5 !rounded-none !border-0 !bg-transparent !px-4 !py-3.5 !text-left !shadow-none hover:!bg-page">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-            {isOpen ? <ChevronDown size={15} className="flex-shrink-0 text-ink-muted" /> : <ChevronRight size={15} className="flex-shrink-0 text-ink-muted" />}
-            <span className="text-sm font-semibold text-ink-primary">{formatDateTime(group.endedAt)}</span>
-            <RunHash hash={group.hash} />
-            <span className="ml-auto flex flex-wrap items-center gap-2 text-xs">
-              {c.failed > 0 && (
-                <span className="badge badge-critical">
-                  <XCircle size={12} /> {c.failed}
+        <div className="flex items-stretch">
+          <button type="button" onClick={() => setOpen((prev) => ({ ...prev, [group.key]: !isOpen }))} className="!flex !w-full !min-w-0 !flex-col !items-stretch !gap-2.5 !rounded-none !border-0 !bg-transparent !px-4 !py-3.5 !text-left !shadow-none hover:!bg-page">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+              {isOpen ? <ChevronDown size={15} className="flex-shrink-0 text-ink-muted" /> : <ChevronRight size={15} className="flex-shrink-0 text-ink-muted" />}
+              <span className="text-sm font-semibold text-ink-primary">{formatDateTime(group.endedAt)}</span>
+              <RunHash hash={group.hash} />
+              <span className="ml-auto flex flex-wrap items-center gap-2 text-xs">
+                {c.failed > 0 && (
+                  <span className="badge badge-critical">
+                    <XCircle size={12} /> {c.failed}
+                  </span>
+                )}
+                <span className="badge badge-good">
+                  <CheckCircle2 size={12} /> {c.passed}
                 </span>
-              )}
-              <span className="badge badge-good">
-                <CheckCircle2 size={12} /> {c.passed}
+                {c.other > 0 && <span className="badge badge-warning">{c.other}</span>}
+                <span className="text-ink-muted">{t('{n} tests', { n: group.items.length })}</span>
+                <span className="text-ink-muted">· {formatDuration(group.durationMs)}</span>
               </span>
-              {c.other > 0 && <span className="badge badge-warning">{c.other}</span>}
-              <span className="text-ink-muted">{t('{n} tests', { n: group.items.length })}</span>
-              <span className="text-ink-muted">· {formatDuration(group.durationMs)}</span>
-            </span>
-          </div>
-          <ResultBar passed={c.passed} failed={c.failed} other={c.other} />
-        </button>
+            </div>
+            <ResultBar passed={c.passed} failed={c.failed} other={c.other} />
+          </button>
+          <button
+            type="button"
+            className="ghost !flex-shrink-0 !rounded-none !border-0 !border-l !border-gridline !px-3 text-ink-muted hover:!text-critical"
+            title={t('Delete this CI run')}
+            onClick={() => void deleteGroup(group)}
+            disabled={deletingKey === group.key}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
 
         {isOpen && (
           <div className="border-t border-gridline">
@@ -179,6 +240,20 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
                       </button>
                     )}
                   </div>
+                  {failed && reasons[r.id] && (
+                    <div className="mt-1.5 ml-[26px] flex items-start gap-1.5 rounded border border-gridline bg-page p-1.5 text-xs text-ink-primary">
+                      <Wrench size={12} className="mt-0.5 flex-shrink-0" />
+                      <span className="min-w-0">
+                        {reasons[r.id]!.step && (
+                          <>
+                            <strong>{t('Stuck on')}:</strong> {reasons[r.id]!.step}
+                            <br />
+                          </>
+                        )}
+                        {reasons[r.id]!.reason}
+                      </span>
+                    </div>
+                  )}
                   {log && (
                     <pre className="codeblock mt-2 max-h-64 overflow-auto">{log.loading ? t('Loading…') : log.text}</pre>
                   )}

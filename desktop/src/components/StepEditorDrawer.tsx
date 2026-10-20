@@ -6,6 +6,7 @@ import {
   EDITABLE_ACTIONS,
   canCauseNavigation,
   hasSelector,
+  supportsActionOptions,
   valueLabel,
   value2Label,
   type EditableStep,
@@ -64,9 +65,19 @@ export function StepEditorDrawer({
 
   const isRaw = draft.action === 'raw';
   const withSelector = hasSelector(draft.action);
+  const withActionOptions = supportsActionOptions(draft.action);
   const vLabel = valueLabel(draft.action);
   const v2Label = value2Label(draft.action);
   const noSelector = withSelector && draft.action !== 'keydown' && Object.values(draft.selectors).every((v) => !v.trim());
+  let optionsJsonError: string | null = null;
+  if (draft.optionsJson.trim()) {
+    try {
+      const parsed = JSON.parse(draft.optionsJson);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) optionsJsonError = t('Must be a JSON object, e.g. {"noWaitAfter": true}');
+    } catch {
+      optionsJsonError = t('Invalid JSON');
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-ink-primary/30" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -226,6 +237,33 @@ export function StepEditorDrawer({
                     <input type="number" min={0} step={100} value={draft.waitBeforeMs} onChange={(e) => set({ waitBeforeMs: e.target.value })} placeholder="0" className="w-full" />
                   </label>
                 </>
+              )}
+            </Section>
+          )}
+
+          {!isRaw && withActionOptions && (
+            <Section title="Playwright options">
+              <Check1
+                label="Force"
+                checked={draft.force}
+                onChange={(v) => set({ force: v })}
+                hint="Skips Playwright's actionability checks (visible, stable, receives events, enabled) -- use when the element is covered, disabled-looking or otherwise blocked but the action should still happen"
+              />
+              <label className="flex flex-col gap-1 text-[13px] font-medium text-ink-secondary">
+                {t('Other options (JSON)')}
+                <textarea
+                  value={draft.optionsJson}
+                  onChange={(e) => set({ optionsJson: e.target.value })}
+                  rows={2}
+                  spellCheck={false}
+                  placeholder='{"noWaitAfter": true, "trial": false}'
+                  className="w-full font-mono text-xs"
+                />
+              </label>
+              {optionsJsonError ? (
+                <div className="text-xs text-critical">{optionsJsonError}</div>
+              ) : (
+                <div className="text-xs text-ink-muted">{t('Merged into the Playwright call as-is (noWaitAfter, trial, position, modifiers, timeout…).')}</div>
               )}
             </Section>
           )}

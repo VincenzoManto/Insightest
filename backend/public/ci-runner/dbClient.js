@@ -50,19 +50,6 @@ async function runMssql(connectionString, sql, params) {
   }
 }
 
-async function runSqlite(connectionString, sql, params) {
-  const Database = require('better-sqlite3');
-  const path = connectionString.replace(/^sqlite:\/\//, '').replace(/^file:/, '');
-  const db = new Database(path);
-  try {
-    const stmt = db.prepare(sql);
-    const rows = stmt.reader ? stmt.all(...(params || [])) : (stmt.run(...(params || [])), []);
-    return { rows, rowCount: rows.length };
-  } finally {
-    db.close();
-  }
-}
-
 /** Runs `sql` against `connectionString` (engine auto-detected from its scheme) and returns
  * { rows, rowCount }. `params` are positional bind parameters, driver-dependent. */
 async function runQuery(connectionString, sql, params = []) {
@@ -76,8 +63,6 @@ async function runQuery(connectionString, sql, params = []) {
       return runMysql(connectionString, sql, params);
     case 'mssql':
       return runMssql(connectionString, sql, params);
-    case 'sqlite':
-      return runSqlite(connectionString, sql, params);
   }
 }
 

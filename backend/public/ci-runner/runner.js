@@ -10,6 +10,8 @@
 // escalates 8000/15000/20000ms); does not affect other action retries.
 // --runfailed: only reruns tests whose last CI run failed/errored, plus any prerequisite test
 // (depends_on_test_id chain) needed to reach them -- instead of the whole suite.
+// --tests <id1,id2,...>: only runs the listed test id(s), plus any prerequisite test
+// (depends_on_test_id chain) needed to reach them -- instead of the whole suite.
 // --chromePath <path> (or INSIGHTEST_CHROME_PATH env var): launches a system-installed
 // Chrome/Edge instead of Playwright's bundled Chromium build -- for old machines whose OS is
 // below Chromium's minimum supported version. Skip `npx playwright install chromium` in run.ps1
@@ -76,6 +78,9 @@ function parseArgs(argv) {
                 break;
             case '--runfailed':
                 args.runfailed = true;
+                break;
+            case '--tests':
+                args.tests = argv[++i];
                 break;
             case '--runid':
                 args.runid = argv[++i];
@@ -827,6 +832,32 @@ async function main() {
         id: Number(t.id),
         depends_on_test_id: t.depends_on_test_id === null || t.depends_on_test_id === undefined || t.depends_on_test_id === '' ? null : Number(t.depends_on_test_id),
     }));
+
+    if (args.tests) {
+        const requestedIds = new Set(
+            args.tests
+                .split(',')
+                .map((s) => Number(s.trim()))
+                .filter((n) => !Number.isNaN(n))
+        );
+        const byId = new Map(tests.map((t) => [t.id, t]));
+        const needed = new Set();
+        const addWithDeps = (id) => {
+            if (needed.has(id)) return;
+            const t = byId.get(id);
+            if (!t) return;
+            needed.add(id);
+            if (t.depends_on_test_id != null) addWithDeps(t.depends_on_test_id);
+        };
+        requestedIds.forEach(addWithDeps);
+        if (needed.size === 0) {
+            console.log(`--tests ${args.tests}: none of the requested test id(s) were returned by the server, nothing to run.`);
+            return;
+        }
+        tests = tests.filter((t) => needed.has(t.id));
+        const prereqCount = tests.filter((t) => !requestedIds.has(t.id)).length;
+        console.log(`--tests: running ${requestedIds.size} requested test(s) plus ${prereqCount} prerequisite test(s) (run first, even if not listed).`);
+    }
 
     if (args.runfailed) {
         const byId = new Map(tests.map((t) => [t.id, t]));

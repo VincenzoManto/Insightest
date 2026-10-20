@@ -61,8 +61,28 @@ function fetchLatestVersion() {
   });
 }
 
+function electronVersion() {
+  try {
+    return require(path.join(ownRoot, 'package.json')).dependencies.electron.replace(/^[\^~]/, '');
+  } catch {
+    return null;
+  }
+}
+
 function npm(args, cwd) {
-  return spawnSync('npm', args, { cwd, stdio: 'inherit', shell: true }).status === 0;
+  // not the system Node's — otherwise they either fail to build (no prebuild
+  // for an unmatched Node version) or load with a mismatched ABI at runtime.
+  const target = electronVersion();
+  const env = target
+    ? {
+        ...process.env,
+        npm_config_runtime: 'electron',
+        npm_config_target: target,
+        npm_config_disturl: 'https://electronjs.org/headers',
+        npm_config_target_arch: process.arch,
+      }
+    : process.env;
+  return spawnSync('npm', args, { cwd, env, stdio: 'inherit', shell: true }).status === 0;
 }
 
 function install(version) {

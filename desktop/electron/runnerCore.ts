@@ -154,6 +154,11 @@ const noBaselineMessage = (): string =>
  * other IPC call. `spawn` + this Promise wrapper keeps the same "wait for the result"
  * call shape for callers while letting Electron's event loop keep servicing the UI.
  */
+function withNodePath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const extra = nodeModulesSearchPath(getPaths().appRoot);
+  return { ...env, NODE_PATH: [env.NODE_PATH, extra].filter(Boolean).join(path.delimiter) };
+}
+
 function runProcessAsync(
   bin: string,
   args: string[],
@@ -164,11 +169,11 @@ function runProcessAsync(
     const child = isScript
       ? spawn(process.execPath, [bin, ...args], {
           cwd: options.cwd,
-          env: { ...(options.env ?? process.env), ELECTRON_RUN_AS_NODE: '1' },
+          env: withNodePath({ ...(options.env ?? process.env), ELECTRON_RUN_AS_NODE: '1' }),
         })
       : spawn(bin, args, {
           cwd: options.cwd,
-          env: options.env ?? process.env,
+          env: withNodePath(options.env ?? process.env),
           shell: process.platform === 'win32',
         });
     let stdout = '';
@@ -251,9 +256,36 @@ export async function explainFailure(log: string): Promise<string | undefined> {
   return output;
 }
 
+/** Every `node_modules` folder from appRoot upwards, for NODE_PATH: lets specs that live outside the app folder resolve `@playwright/test` & co. */
+function nodeModulesSearchPath(appRoot: string): string {
+  const dirs: string[] = [];
+  for (let dir = appRoot; ; dir = path.dirname(dir)) {
+    dirs.push(path.join(dir, 'node_modules'));
+    if (path.dirname(dir) === dir) break;
+  }
+  return dirs.filter((d) => fs.existsSync(d)).join(path.delimiter);
+}
+
 export function makeScratchDir(prefix: string): string {
-  const base = path.join(getPaths().appRoot, '.insightest-tmp');
+  const { appRoot, userDataDir } = getPaths();
+  // Playwright never transpiles files under a `node_modules` folder, so a .ts spec there fails on its first
+  // `import`. An npx/managed install lives inside node_modules, hence the scratch dir moves to userData then.
+  const inNodeModules = path.resolve(appRoot).split(path.sep).includes('node_modules');
+  const base = path.join(inNodeModules ? userDataDir : appRoot, '.insightest-tmp');
   fs.mkdirSync(base, { recursive: true });
+  if (inNodeModules) {
+    // Specs resolve `@playwright/test` by walking up from their own folder: link the real install next to them.
+    // 'junction' needs no admin rights on Windows (ignored elsewhere).
+    const link = path.join(base, 'node_modules');
+    const target = path.dirname(resolveNodeModule(appRoot, '@playwright'));
+    try {
+      // A link left by an earlier build may point elsewhere: recreate it unless it already resolves to the right place.
+      if (fs.existsSync(link) && fs.realpathSync(link) !== fs.realpathSync(target)) fs.unlinkSync(link);
+      if (!fs.existsSync(link)) fs.symlinkSync(target, link, 'junction');
+    } catch {
+      /* NODE_PATH (see withNodePath) is the fallback */
+    }
+  }
   return fs.mkdtempSync(path.join(base, prefix));
 }
 

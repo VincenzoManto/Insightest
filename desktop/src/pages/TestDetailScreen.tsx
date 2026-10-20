@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Play, Pencil, Wand2, Wrench, Globe, MousePointerClick, Type, CheckSquare, ChevronDown, ChevronUp, Keyboard, Code2, Video, Tag as TagIcon, StickyNote, X, Plus, Save, MoreVertical, FileText, CheckCircle2, XCircle, CircleDot, FolderOpen, Hourglass } from 'lucide-react';
+import { ArrowLeft, Play, Pencil, Wand2, Wrench, Globe, MousePointerClick, Type, CheckSquare, ChevronDown, ChevronUp, Keyboard, Code2, Video, Tag as TagIcon, StickyNote, X, Plus, Save, MoreVertical, FileText, CheckCircle2, XCircle, CircleDot, FolderOpen, Hourglass, Download } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import { computeStepStatuses, type StatusStep, type StepStatus } from '../stepStatus';
+import { getFailureReason } from '../failureReason';
+import { compileTestToVanilla, resolveDependencyChain, slugifyFileName } from '../exportVanilla';
+import { downloadBlob } from '../zip';
 import { StepEditorDrawer } from '../components/StepEditorDrawer';
 import { RunProgressRing } from '../components/RunProgressRing';
 import { HealPanel } from '../components/HealPanel';
@@ -305,6 +308,10 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
   const [headed, setHeaded] = useState(true);
   const [betweenActionMs, setBetweenActionMs] = useState(400);
   const [lastLog, setLastLog] = useState<string | null>(null);
+  const [logModal, setLogModal] = useState<{ runId: number; log: string | null; loading: boolean } | null>(null);
+  const [exportingVanilla, setExportingVanilla] = useState(false);
+  // Failure reason per run, computed from its log fetched in the background (no click needed) -- cache keyed by run id so a run is never re-fetched.
+  const [runReasons, setRunReasons] = useState<Record<number, ReturnType<typeof getFailureReason>>>({});
   const [error, setError] = useState<string | null>(null);
   const [runFilter, setRunFilter] = useState<RunFilter>('all');
   const [tab, setTab] = useState<DetailTab>('history');
@@ -442,6 +449,33 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
   useEffect(() => {
     if (liveLogRef.current) liveLogRef.current.scrollTop = liveLogRef.current.scrollHeight;
   }, [liveLines]);
+
+  // Fetches each failed/error run's log in the background (most recent first, capped) so the
+  // "where it got stuck" reason shows up in the list on its own, without the user clicking anything.
+  useEffect(() => {
+    const toFetch = runs
+      .filter((r) => (r.status === 'failed' || r.status === 'error') && !(r.id in runReasons))
+      .sort((a, b) => b.id - a.id)
+      .slice(0, 20);
+    if (toFetch.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (const run of toFetch) {
+        try {
+          const detail = await api.get<TestRunDetail>(`/tests/${testId}/runs/${run.id}`);
+          if (cancelled) return;
+          setRunReasons((prev) => ({ ...prev, [run.id]: getFailureReason(detail.log) }));
+        } catch {
+          if (cancelled) return;
+          setRunReasons((prev) => ({ ...prev, [run.id]: null }));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs]);
 
   async function runLocally(): Promise<void> {
     if (!test) return;
@@ -604,6 +638,33 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
       setError(err instanceof Error ? err.message : t('Unknown error'));
     } finally {
       setSavingTag(false);
+    }
+  }
+
+  /** Compiles this test (and its prerequisite chain) into a standalone vanilla Playwright `.spec.ts` and downloads it. */
+  async function exportVanilla(): Promise<void> {
+    if (!test) return;
+    setExportingVanilla(true);
+    setError(null);
+    try {
+      const dependencies = await resolveDependencyChain(test, (id) => api.get<TestDetail>(`/tests/${id}`));
+      const code = compileTestToVanilla(test, dependencies, selectorPriority);
+      downloadBlob(new Blob([code], { type: 'text/plain' }), `${slugifyFileName(test.name)}.spec.ts`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('Unknown error'));
+    } finally {
+      setExportingVanilla(false);
+    }
+  }
+
+  /** Opens the log modal for one run, fetching its (potentially large) log on demand -- the run list never carries it. */
+  async function viewRunLog(runId: number): Promise<void> {
+    setLogModal({ runId, log: null, loading: true });
+    try {
+      const detail = await api.get<TestRunDetail>(`/tests/${testId}/runs/${runId}`);
+      setLogModal({ runId, log: detail.log ?? t('No log recorded for this run.'), loading: false });
+    } catch (err) {
+      setLogModal({ runId, log: err instanceof Error ? err.message : t('Unknown error'), loading: false });
     }
   }
 
@@ -970,6 +1031,9 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                 <Code2 size={13} /> {showCode ? t('Hide code') : t('Show code')}
               </button>
             )}
+            <button className="secondary sm" onClick={() => void exportVanilla()} disabled={exportingVanilla} title={t('Downloads this test (and its prerequisites) as a plain Playwright .spec.ts file, no insightest runtime required.')}>
+              <Download size={13} /> {exportingVanilla ? t('Exporting…') : t('Export Playwright')}
+            </button>
           </div>
 
           {steps.length === 0 || showCode ? (
@@ -1051,6 +1115,25 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
               {lastLog && !running && (
                 <div className={liveLines.length > 0 ? 'mt-4' : ''}>
                   {liveLines.length > 0 && <div className="mb-1.5 text-sm font-semibold text-ink-primary">{t('Last local run log')}</div>}
+                  {runOutcome === 'failed' &&
+                    (() => {
+                      const failure = getFailureReason(lastLog);
+                      if (!failure) return null;
+                      return (
+                        <div className="mb-1.5 flex items-start gap-1.5 rounded border border-gridline bg-page p-2 text-xs text-ink-primary">
+                          <Wrench size={12} className="mt-0.5 flex-shrink-0" />
+                          <span className="min-w-0">
+                            {failure.step && (
+                              <>
+                                <strong>{t('Stuck on')}:</strong> {failure.step}
+                                <br />
+                              </>
+                            )}
+                            {failure.reason}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   <pre className="codeblock m-0 max-h-64">{lastLog}</pre>
                 </div>
               )}
@@ -1185,6 +1268,9 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                     <span className="text-xs text-ink-secondary">{run.triggered_by === 'ci' ? t('CI/CD') : t('Local')}</span>
                     <span className="text-xs text-ink-muted">{run.duration_ms ? `${run.duration_ms}ms` : '—'}</span>
                     <span className="ml-auto text-xs text-ink-muted">{formatDateTime(run.created_at)}</span>
+                    <button className="secondary !px-2 !py-1 text-xs" onClick={() => viewRunLog(run.id)}>
+                      <FileText size={12} /> {t('View log')}
+                    </button>
                     {(run.status === 'failed' || run.status === 'error') && (
                       <>
                         <button className="secondary !px-2 !py-1 text-xs" onClick={() => analyzeHealing(run.id)} disabled={healingRunId === run.id}>
@@ -1223,6 +1309,24 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                       </>
                     )}
                   </div>
+                  {(() => {
+                    const reason = runReasons[run.id];
+                    if (!reason) return null;
+                    return (
+                      <div className="mt-1.5 flex items-start gap-1.5 rounded border border-gridline bg-page p-1.5 text-xs text-ink-primary">
+                        <Wrench size={12} className="mt-0.5 flex-shrink-0" />
+                        <span className="min-w-0">
+                          {reason.step && (
+                            <>
+                              <strong>{t('Stuck on')}:</strong> {reason.step}
+                              <br />
+                            </>
+                          )}
+                          {reason.reason}
+                        </span>
+                      </div>
+                    );
+                  })()}
                   {run.healing_detail && (
                     <div className="mt-1.5 flex items-start gap-1.5 text-xs text-accent2">
                       <Wrench size={12} className="mt-0.5 flex-shrink-0" />
@@ -1233,6 +1337,44 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
               ))}
             </div>
           </div>
+
+          {logModal && (
+            <div className="modal-overlay" onClick={() => setLogModal(null)}>
+              <div className="modal flex max-h-[85vh] max-w-2xl flex-col" onClick={(e) => e.stopPropagation()}>
+                <div className="mb-2 flex flex-shrink-0 items-center justify-between">
+                  <p className="text-sm font-semibold text-ink-primary">{t('Run log')}</p>
+                  <button className="ghost !h-5 !w-5 !p-0" onClick={() => setLogModal(null)}>
+                    <X size={14} />
+                  </button>
+                </div>
+                {logModal.loading ? (
+                  <p className="text-sm text-ink-muted">{t('Loading…')}</p>
+                ) : (
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    {(() => {
+                      const failure = getFailureReason(logModal.log);
+                      if (!failure) return null;
+                      return (
+                        <div className="mb-2 flex flex-shrink-0 items-start gap-1.5 rounded border border-gridline bg-page p-2 text-xs text-ink-primary">
+                          <Wrench size={12} className="mt-0.5 flex-shrink-0" />
+                          <span className="min-w-0">
+                            {failure.step && (
+                              <>
+                                <strong>{t('Stuck on')}:</strong> {failure.step}
+                                <br />
+                              </>
+                            )}
+                            {failure.reason}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                    <pre className="codeblock m-0 min-h-0 flex-1 overflow-auto">{logModal.log}</pre>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {repairResult && (
             <div className="card mt-4">

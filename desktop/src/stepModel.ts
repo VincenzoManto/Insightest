@@ -83,6 +83,10 @@ export const ACTION_LABEL: Record<StepAction, string> = {
 export function hasSelector(action: StepAction): boolean {
   return META_METHODS.includes(action);
 }
+/** Actions whose generated call accepts a trailing Playwright action-options object (force, noWaitAfter, trial, …). */
+export function supportsActionOptions(action: StepAction): boolean {
+  return ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2'].includes(action);
+}
 /** Actions that take a value (typed text, option, key, url, ms, width). */
 export function valueLabel(action: StepAction): string | null {
   switch (action) {
@@ -161,6 +165,10 @@ export interface EditableStep {
   timeout: string;
   /** Pause before the action, in ms. */
   waitBeforeMs: string;
+  /** Playwright's `force: true` (click/fill/… bypass actionability checks, e.g. a visually-covered or disabled-looking element). */
+  force: boolean;
+  /** Any other Playwright action option (noWaitAfter, trial, position, modifiers, …), as a raw JSON object string; merged alongside `force`. */
+  optionsJson: string;
   /** Recorded metadata the editor doesn't expose but must not lose. */
   textHint?: string;
   tagHint?: string;
@@ -212,6 +220,8 @@ export function newStep(action: StepAction = 'click'): EditableStep {
     skipOnFailure: false,
     timeout: '',
     waitBeforeMs: '',
+    force: false,
+    optionsJson: '',
     countsMeta: hasSelector(action),
     dbMode: action === 'DB' ? 'snapshot' : undefined,
     dbSnapshotName: action === 'DB' ? '' : undefined,
@@ -280,8 +290,10 @@ function selectorsFromMeta(primary: string | null, meta: any): { selectors: Step
   return { selectors, visible: anyCss ? anyVisible : true };
 }
 
-/** Which selector the code's positional argument carries: the first filled one in the project's priority. */
-function primarySelector(step: EditableStep, priority: readonly string[]): string {
+/** Which selector the code's positional argument carries: the first filled one in the project's priority.
+ * Exported for the vanilla-Playwright exporter: this string is also a valid `page.locator()` argument as-is
+ * (`xpath=`, `text=` and CSS incl. `:visible` are all native Playwright selector syntax). */
+export function primarySelector(step: EditableStep, priority: readonly string[]): string {
   const order = [...priority, ...SELECTOR_KEYS];
   for (const key of order) {
     if (!(SELECTOR_KEYS as readonly string[]).includes(key)) continue;
@@ -312,6 +324,13 @@ function stepFromCall(method: string, args: unknown[], meta: any, rawLine: strin
   step.countsMeta = META_METHODS.includes(method);
   const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
   const bool = (v: unknown): boolean => v === true;
+  // Splits the trailing Playwright options object (if any) into the `force` checkbox and everything else.
+  const setOptions = (v: unknown): void => {
+    if (!v || typeof v !== 'object') return;
+    const { force, ...rest } = v as Record<string, unknown>;
+    step.force = force === true;
+    step.optionsJson = Object.keys(rest).length ? JSON.stringify(rest) : '';
+  };
 
   const setSel = (primary: unknown): void => {
     const { selectors, visible } = selectorsFromMeta(typeof primary === 'string' && primary ? primary : null, meta);
@@ -375,6 +394,7 @@ function stepFromCall(method: string, args: unknown[], meta: any, rawLine: strin
       step.action = method;
       setSel(args[0]);
       step.causesNavigation = bool(args[1]);
+      setOptions(args[2]);
       break;
     case 'type':
     case 'fill':
@@ -383,12 +403,14 @@ function stepFromCall(method: string, args: unknown[], meta: any, rawLine: strin
       setSel(args[0]);
       step.value = str(args[1]);
       step.causesNavigation = bool(args[2]);
+      setOptions(args[3]);
       break;
     case 'keydown':
       step.action = 'keydown';
       setSel(args[0]);
       step.value = str(args[1]);
       step.causesNavigation = bool(args[2]);
+      setOptions(args[3]);
       break;
     case 'select2':
       step.action = 'select2';
@@ -396,6 +418,7 @@ function stepFromCall(method: string, args: unknown[], meta: any, rawLine: strin
       step.value = str(args[1]);
       step.valueIsNumber = typeof args[1] === 'number';
       step.causesNavigation = bool(args[2]);
+      setOptions(args[3]);
       break;
     case 'clearInput':
       step.action = 'clearInput';
@@ -524,10 +547,27 @@ function metaOf(step: EditableStep): Record<string, unknown> | null {
   return Object.keys(meta).length ? meta : null;
 }
 
+/** Merges the `force` checkbox with the free-form `optionsJson`; invalid/non-object JSON is ignored (force alone still applies). */
+function actionOptions(step: EditableStep): Record<string, unknown> | null {
+  const opts: Record<string, unknown> = {};
+  if (step.optionsJson?.trim()) {
+    try {
+      const extra = JSON.parse(step.optionsJson);
+      if (extra && typeof extra === 'object' && !Array.isArray(extra)) Object.assign(opts, extra);
+    } catch {
+      /* malformed JSON: dropped, force (below) still gets through */
+    }
+  }
+  if (step.force) opts.force = true;
+  return Object.keys(opts).length ? opts : null;
+}
+
 function callLine(step: EditableStep, priority: readonly string[]): string {
   const nav = step.causesNavigation;
   const sel = q(primarySelector(step, priority));
   const num = (v: string, fallback: number): number => (Number.isFinite(Number(v)) && v.trim() !== '' ? Number(v) : fallback);
+  const opts = supportsActionOptions(step.action) ? actionOptions(step) : null;
+  const optsArg = opts ? `, ${q(opts)}` : '';
   switch (step.action) {
     case 'load':
       return `await pw.load(${q(step.value)});`;
@@ -561,15 +601,15 @@ function callLine(step: EditableStep, priority: readonly string[]): string {
     case 'doubleClick':
     case 'rightClick':
     case 'hover':
-      return `await pw.${step.action}(${sel}, ${nav});`;
+      return `await pw.${step.action}(${sel}, ${nav}${optsArg});`;
     case 'type':
     case 'fill':
     case 'select':
-      return `await pw.${step.action}(${sel}, ${q(step.value)}, ${nav});`;
+      return `await pw.${step.action}(${sel}, ${q(step.value)}, ${nav}${optsArg});`;
     case 'keydown':
-      return `await pw.keydown(${sel === '""' ? 'null' : sel}, ${q(step.value)}, ${nav});`;
+      return `await pw.keydown(${sel === '""' ? 'null' : sel}, ${q(step.value)}, ${nav}${optsArg});`;
     case 'select2':
-      return `await pw.select2(${sel}, ${step.valueIsNumber && step.value.trim() !== '' ? num(step.value, 0) : q(step.value)}, ${nav});`;
+      return `await pw.select2(${sel}, ${step.valueIsNumber && step.value.trim() !== '' ? num(step.value, 0) : q(step.value)}, ${nav}${optsArg});`;
     case 'clearInput':
       return `await pw.clearInput(${sel});`;
     case 'DB': {
