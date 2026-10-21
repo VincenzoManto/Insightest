@@ -20,6 +20,7 @@ export type StepAction =
   | 'select2'
   | 'keydown'
   | 'clearInput'
+  | 'upload'
   | 'wait'
   | 'resize'
   | 'back'
@@ -38,7 +39,7 @@ export type StepAction =
   | 'raw';
 
 /** Must match BUILDER_META_METHODS in ci-runner/runner.js: these lines consume one steps_json entry each. */
-export const META_METHODS: readonly string[] = ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'clearInput'];
+export const META_METHODS: readonly string[] = ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'clearInput', 'upload'];
 
 export const SELECTOR_KEYS = ['xpath', 'generalSelector', 'attrSelector', 'testIdSelector', 'id', 'text'] as const;
 export type SelectorKey = (typeof SELECTOR_KEYS)[number];
@@ -46,7 +47,7 @@ export type StepSelectors = Record<SelectorKey, string>;
 
 /** Actions the editor can create/convert between, in the order shown in the Action dropdown. */
 export const EDITABLE_ACTIONS: StepAction[] = [
-  'load', 'click', 'doubleClick', 'rightClick', 'hover', 'fill', 'type', 'select', 'select2', 'keydown', 'clearInput', 'wait', 'resize',
+  'load', 'click', 'doubleClick', 'rightClick', 'hover', 'fill', 'type', 'select', 'select2', 'keydown', 'clearInput', 'upload', 'wait', 'resize',
   'back', 'forward', 'refresh', 'wheel', 'dragAndDrop', 'awaitText', 'awaitNetworkStatus', 'fullScreenshot', 'alert', 'prompt', 'confirm', 'customAction', 'DB',
 ];
 
@@ -62,6 +63,7 @@ export const ACTION_LABEL: Record<StepAction, string> = {
   select2: 'Select2',
   keydown: 'Press',
   clearInput: 'Clear',
+  upload: 'Upload file',
   wait: 'Wait',
   resize: 'Resize',
   back: 'Go back',
@@ -85,7 +87,7 @@ export function hasSelector(action: StepAction): boolean {
 }
 /** Actions whose generated call accepts a trailing Playwright action-options object (force, noWaitAfter, trial, …). */
 export function supportsActionOptions(action: StepAction): boolean {
-  return ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2'].includes(action);
+  return ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'upload'].includes(action);
 }
 /** Actions that take a value (typed text, option, key, url, ms, width). */
 export function valueLabel(action: StepAction): string | null {
@@ -99,6 +101,8 @@ export function valueLabel(action: StepAction): string | null {
       return 'Option (text, or position)';
     case 'keydown':
       return 'Key';
+    case 'upload':
+      return 'File path (comma-separated for multiple files)';
     case 'load':
       return 'URL';
     case 'wait':
@@ -399,6 +403,7 @@ function stepFromCall(method: string, args: unknown[], meta: any, rawLine: strin
     case 'type':
     case 'fill':
     case 'select':
+    case 'upload':
       step.action = method;
       setSel(args[0]);
       step.value = str(args[1]);
@@ -605,6 +610,7 @@ function callLine(step: EditableStep, priority: readonly string[]): string {
     case 'type':
     case 'fill':
     case 'select':
+    case 'upload':
       return `await pw.${step.action}(${sel}, ${q(step.value)}, ${nav}${optsArg});`;
     case 'keydown':
       return `await pw.keydown(${sel === '""' ? 'null' : sel}, ${q(step.value)}, ${nav}${optsArg});`;

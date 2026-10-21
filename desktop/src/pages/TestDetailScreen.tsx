@@ -123,6 +123,7 @@ const BUILDER_ICON: Record<StepAction, ParsedStep['action']> = {
   clearInput: 'fill',
   select: 'select',
   select2: 'select',
+  upload: 'other',
   keydown: 'press',
   wait: 'wait',
   resize: 'other',

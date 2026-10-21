@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { dialog } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
@@ -41,7 +42,8 @@ export type InsightestActionType =
   | 'select2'
   | 'alert'
   | 'prompt'
-  | 'confirm';
+  | 'confirm'
+  | 'upload';
 
 /** Every selector computed for an element at record time (same set as Insighter's genSelectors). */
 export interface RecordedSelectors {
@@ -361,6 +363,214 @@ function insightestPageRecorder(cfg: PageRecorderConfig): void {
       selectors: selectorsOf(el),
       rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
     };
+  }
+
+  /* ---------------------------------------------------------------- "Auto" (non-AI auto-fill + record) */
+  // Same heuristics as the project's standalone DOM-crawling agent, trimmed to "what's on screen right now"
+  // instead of a multi-page crawl: this scans the CURRENT page, fills every field it can with deterministic
+  // non-ML values, clicks the safe action(s), and opens tabs/accordions to fill whatever they reveal too --
+  // every one of those steps goes through the exact same `action()` used for a human's own clicks/typing, so
+  // it becomes a normal, continuous part of THIS recording (no separate flow, no separate browser).
+  const FILLABLE_SELECTOR = 'input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"], [role="combobox"], [role="checkbox"], [role="radio"], [role="switch"]';
+  const ACTION_SELECTOR = 'button, input[type="submit"], input[type="button"], [role="button"], a';
+  const isFillable = (el: Element): boolean => {
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+    if ((el as HTMLElement).isContentEditable) return true;
+    if (el.tagName === 'INPUT') return !/^(submit|button|reset|image|hidden)$/i.test((el as HTMLInputElement).type || 'text');
+    const role = el.getAttribute('role');
+    return !!role && /^(textbox|combobox|checkbox|radio|switch|spinbutton)$/.test(role);
+  };
+  const ACTION_WORDS = /\b(save|submit|send|confirm|add|create|update|apply|login|log in|sign in|signin|search|go|continue|next|ok|invia|salva|conferma|aggiungi|crea|accedi|cerca|continua)\b/i;
+  const isActionLike = (el: Element): boolean => {
+    if (!isVisible(el)) return false;
+    const tag = el.tagName;
+    if (tag === 'BUTTON' || (tag === 'INPUT' && /^(submit|button)$/i.test((el as HTMLInputElement).type || ''))) return true;
+    const role = el.getAttribute('role');
+    if (role === 'button') return true;
+    if ((el as any).onclick) return true;
+    if (tag === 'A' && ACTION_WORDS.test(textOf(el))) return true;
+    return false;
+  };
+  const AUTO_DESTRUCTIVE = /\b(delete|remove|destroy|unsubscribe|deactivate|archive|cancel|elimina|cancella|rimuovi|disiscrivi|disattiva)\b/i;
+
+  /** Nearest ancestor action button for one field (same idea as the crawling agent's clustering, trimmed:
+   * this only needs to decide what to click after filling, not build named flow groups). */
+  function nearestAction(el: Element): Element | null {
+    let cur = el.parentElement;
+    let hops = 0;
+    while (cur && cur !== document.body && hops < 14) {
+      const candidate = Array.from(cur.querySelectorAll(ACTION_SELECTOR)).find((a) => isActionLike(a));
+      if (candidate) return candidate;
+      cur = cur.parentElement;
+      hops++;
+    }
+    return null;
+  }
+
+  const AUTO_EMAIL_RAND = (): string => Math.random().toString(36).slice(2, 8);
+  /** Deterministic, rule-based value inference -- no ML/LLM, no network. File inputs always return null:
+   * a path isn't a "value" in this sense, and only the main process (via requestFile/electron.dialog) can
+   * supply a real, usable one. */
+  function inferValue(el: Element): string | null {
+    const tag = el.tagName;
+    const input = el as HTMLInputElement;
+    const type = tag === 'INPUT' ? (input.type || 'text').toLowerCase() : tag === 'TEXTAREA' ? 'text' : '';
+    const signal = `${el.getAttribute('name') || ''} ${el.getAttribute('autocomplete') || ''} ${labelText(el)} ${el.getAttribute('placeholder') || ''}`.toLowerCase();
+    if (type === 'hidden' || type === 'file') return null;
+    if (type === 'checkbox' || type === 'radio') return 'true';
+    if (type === 'email' || /e-?mail/.test(signal)) return `insightest.test+${AUTO_EMAIL_RAND()}@example.com`;
+    if (type === 'tel' || /phone|tel/.test(signal)) return '+1 555 0100';
+    if (type === 'url') return 'https://example.com/';
+    if (type === 'number' || /age|quantity|amount|count/.test(signal)) {
+      const min = input.min !== '' ? Number(input.min) : undefined;
+      const max = input.max !== '' ? Number(input.max) : undefined;
+      if (min !== undefined && max !== undefined) return String(Math.round((min + max) / 2));
+      if (min !== undefined) return String(min + 1);
+      if (max !== undefined) return String(Math.max(0, max - 1));
+      return '1';
+    }
+    if (['date', 'datetime-local', 'month', 'week'].includes(type)) return new Date().toISOString().slice(0, 10);
+    if (type === 'password') return 'Insightest!2024x';
+    if (/first.?name/.test(signal)) return 'Jordan';
+    if (/last.?name/.test(signal)) return 'Avery';
+    if (/\bname\b/.test(signal)) return 'Jordan Avery';
+    if (/address|street/.test(signal)) return '123 Example St';
+    if (/city/.test(signal)) return 'Springfield';
+    if (/zip|postal/.test(signal)) return '94105';
+    if (tag === 'SELECT') {
+      const sel = el as HTMLSelectElement;
+      const opt = Array.from(sel.options).find((o) => o.value && !/^(select|choose|--)/i.test(o.text));
+      return (opt || sel.options[0])?.value ?? null;
+    }
+    if (/state|province/.test(signal)) return 'CA';
+    if (/country/.test(signal)) return 'US';
+    const maxLen = input.maxLength > 0 ? input.maxLength : undefined;
+    const fallback = 'Test value';
+    return maxLen ? fallback.slice(0, maxLen) : fallback;
+  }
+
+  /** Sets a form field's value the way a real user effectively would (the native property setter, so
+   * React/Vue/Angular's own change tracking sees it) and dispatches input/change for the SITE's own
+   * listeners -- the recorder's own listeners only react to isTrusted events, so this never double-records;
+   * the caller always calls `action()` itself right after. */
+  function setFieldValue(el: Element, value: string): void {
+    if ((el as HTMLElement).isContentEditable) {
+      (el as HTMLElement).innerText = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    const tag = el.tagName;
+    const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : tag === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(el, value);
+    else (el as HTMLInputElement).value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  function setChecked(el: Element, checked: boolean): void {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+    if (setter) setter.call(el, checked);
+    else (el as HTMLInputElement).checked = checked;
+    el.dispatchEvent(new Event('click', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  /** Asks the main process (via electron.dialog -- the only place that can return a real, usable path) for a
+   * file to upload. The driver itself sets it on the page and records the step once a file was actually
+   * chosen -- see insightestRecorderDriver's `needsFile` case -- so there is nothing further to record here. */
+  function requestFile(desc: any): Promise<boolean> {
+    return send({ ...desc, kind: 'needsFile' }).then((r: any) => !!(r && r.filled));
+  }
+
+  async function autoFillField(el: Element): Promise<void> {
+    if (!isVisible(el) || !isFillable(el)) return;
+    const desc = describe(el);
+    if (desc.inputType === 'hidden') return;
+    if (desc.inputType === 'file') {
+      await requestFile(desc);
+      return;
+    }
+    if (desc.inputType === 'checkbox' || desc.inputType === 'radio') {
+      setChecked(el, true);
+      action('click', desc, `${L('Click')} ${nameOf(desc)}`);
+      return;
+    }
+    const value = inferValue(el);
+    if (value === null) return;
+    setFieldValue(el, value);
+    action('input', { ...desc, value }, `${L('Fill')} ${nameOf(desc)}`);
+  }
+
+  async function autoClick(el: Element): Promise<void> {
+    const desc = describe(el);
+    if (AUTO_DESTRUCTIVE.test(desc.textHint || '')) return;
+    action('click', desc, `${L('Click')} ${nameOf(desc)}`);
+    (el as HTMLElement).click();
+  }
+
+  /** One pass over whatever is in `scope` right now: fields grouped by their nearest action button get
+   * filled then that button is clicked; fields with no nearby action, and action buttons no field claimed
+   * (e.g. a lone "Load more"), are still filled/clicked on their own. */
+  async function autoFillScope(scope: ParentNode): Promise<void> {
+    const fillable = Array.from(scope.querySelectorAll(FILLABLE_SELECTOR)).filter((el) => isFillable(el) && isVisible(el));
+    const byAction = new Map<Element, Element[]>();
+    const standaloneFields: Element[] = [];
+    for (const el of fillable) {
+      const owner = nearestAction(el);
+      if (!owner) {
+        standaloneFields.push(el);
+        continue;
+      }
+      const list = byAction.get(owner);
+      if (list) list.push(el);
+      else byAction.set(owner, [el]);
+    }
+    for (const [actionEl, fields] of byAction) {
+      for (const f of fields) await autoFillField(f);
+      await autoClick(actionEl);
+    }
+    for (const f of standaloneFields) await autoFillField(f);
+    const usedActions = new Set(byAction.keys());
+    const standaloneActions = Array.from(scope.querySelectorAll(ACTION_SELECTOR)).filter((a) => isActionLike(a) && !usedActions.has(a));
+    for (const a of standaloneActions) await autoClick(a);
+  }
+
+  /** Tabs (ARIA or common non-ARIA widgets) and closed accordion/collapsible triggers are opened one at a
+   * time -- each becomes a recorded click -- then whatever they reveal is filled the same way as the page
+   * itself. Already-open accordions need no click: their fields are already reachable by the scan above. */
+  async function autoExplore(): Promise<void> {
+    const ariaTabs = Array.from(document.querySelectorAll('[role="tab"], [aria-selected]'));
+    const classTabs = Array.from(
+      document.querySelectorAll('.nav-tabs [data-toggle="tab"], .nav-tabs [data-bs-toggle="tab"], [class*="tab-trigger"], [class*="tab-button"]')
+    ).filter((el) => !ariaTabs.includes(el));
+    for (const tab of [...ariaTabs, ...classTabs].filter((t) => isVisible(t))) {
+      await autoClick(tab);
+      await new Promise((r) => setTimeout(r, 400));
+      await autoFillScope(document);
+    }
+    const accordions = Array.from(
+      document.querySelectorAll('[aria-expanded="false"], [data-toggle="collapse"], [data-bs-toggle="collapse"]')
+    ).filter((el) => isVisible(el));
+    for (const acc of accordions) {
+      await autoClick(acc);
+      await new Promise((r) => setTimeout(r, 400));
+      await autoFillScope(document);
+    }
+  }
+
+  let autoRunning = false;
+  /** The "Auto" toolbar button. */
+  async function runAuto(): Promise<void> {
+    if (paused || autoRunning) return;
+    autoRunning = true;
+    renderStatus(L('Auto-filling…'));
+    try {
+      await autoFillScope(document);
+      await autoExplore();
+    } finally {
+      autoRunning = false;
+      renderStatus();
+    }
   }
 
   const INTERACTIVE =
@@ -970,6 +1180,7 @@ function insightestPageRecorder(cfg: PageRecorderConfig): void {
       showPanel(panel && panel.style.display === 'block' ? null : box);
       ta.focus();
     }));
+    tools.appendChild(button(L('Auto'), L('Auto-fill this page (fields, buttons, tabs, sections) and record it'), () => { runAuto(); }));
 
     statusEl = document.createElement('div');
     statusEl.className = 'status';
@@ -1052,7 +1263,37 @@ async function insightestRecorderDriver(pw: any, cfg: DriverConfig): Promise<voi
   };
   browser.on('disconnected', () => process.exit(0));
 
-  await context.exposeBinding('__insightestEmit', (source: any, evt: any) => {
+  // The "Auto" toolbar button's file-upload fields: this plain Node child (ELECTRON_RUN_AS_NODE=1) has no
+  // electron.dialog of its own, so the request is relayed up to the real Electron main process (which spawned
+  // this child and is reading its stdout -- see recordInsightestActions) and the answer comes back on stdin.
+  let fileReqSeq = 0;
+  const pendingFileAnswers = new Map<string, (filePath: string | null) => void>();
+  readline.createInterface({ input: process.stdin }).on('line', (line: string) => {
+    try {
+      const msg = JSON.parse(line) as { requestId: string; filePath: string | null };
+      const resolve = pendingFileAnswers.get(msg.requestId);
+      if (resolve) {
+        pendingFileAnswers.delete(msg.requestId);
+        resolve(msg.filePath ?? null);
+      }
+    } catch {
+      /* partial/foreign line */
+    }
+  });
+  /** Best Playwright-usable selector string for a page-computed RecordedSelectors bundle, same priority
+   * (id > testId > attr > general > xpath > text) used everywhere else in the engine. */
+  function pwSelectorOf(s: any): string | null {
+    if (!s) return null;
+    if (s.id) return s.id;
+    if (s.testIdSelector) return s.testIdSelector;
+    if (s.attrSelector) return s.attrSelector;
+    if (s.generalSelector) return s.generalSelector;
+    if (s.xpath) return `xpath=${s.xpath}`;
+    if (s.text) return `text=${s.text}`;
+    return null;
+  }
+
+  await context.exposeBinding('__insightestEmit', async (source: any, evt: any) => {
     if (!evt || typeof evt !== 'object' || !source || !source.page) return null;
     if (source.frame !== source.page.mainFrame()) return { paused, toolbarPos };
     switch (evt.kind) {
@@ -1070,6 +1311,22 @@ async function insightestRecorderDriver(pw: any, cfg: DriverConfig): Promise<voi
       case 'resume':
         paused = false;
         break;
+      case 'needsFile': {
+        // Only electron.dialog can return a real, usable absolute path -- a page script can never read one
+        // back from a file input (browsers redact it to "C:\fakepath\..." for security), so there is no way
+        // to synthesize this step; the user is asked for a real file, exactly as the "Auto" button promises.
+        const requestId = `f${++fileReqSeq}`;
+        const filePath = await new Promise<string | null>((resolve) => {
+          pendingFileAnswers.set(requestId, resolve);
+          out({ kind: 'needsFile', requestId, label: evt.textHint || '' });
+        });
+        if (filePath) {
+          const sel = pwSelectorOf(evt.selectors);
+          if (sel) await source.page.setInputFiles(sel, filePath).catch(() => {});
+          out({ kind: 'action', type: 'upload', ts: Date.now(), selectors: evt.selectors || {}, textHint: evt.textHint, tagName: evt.tagName, value: filePath, page: pages.indexOf(source.page) });
+        }
+        return { paused, toolbarPos, filled: !!filePath };
+      }
       default:
         if (paused && evt.kind !== 'document') return { paused, toolbarPos };
     }
@@ -1368,6 +1625,8 @@ export function actionToBuilderStep(a: InsightestAction): RecordedBuilderStep | 
       return base('confirm', a.value === 'false' ? 'false' : 'true');
     case 'customAction':
       return base('customAction', a.code ?? '');
+    case 'upload':
+      return base('upload', a.value ?? '');
     default:
       return null; // 'use' (test dependency) has no browser event
   }
@@ -1382,6 +1641,7 @@ const TOOLBAR_LABELS = [
   'Screenshot', 'Full page screenshot', 'Custom JavaScript code run in the page', 'Custom code', 'Add', 'Hover: Ctrl+Shift+H on the element under the pointer',
   'Double click', 'Right click', 'Fill', 'Choose', 'Press', 'Resize', 'Click', 'Hover', 'Drag and drop', 'Scroll',
   'Drag to move, double click to reset',
+  'Auto', 'Auto-fill this page (fields, buttons, tabs, sections) and record it', 'Auto-filling…',
 ];
 
 /** The script injected in every page of the recording browser. It reports to `window.__insightestEmit`. */
@@ -1399,6 +1659,7 @@ export async function recordInsightestActions(startUrl: string): Promise<Insight
   fs.writeFileSync(
     scriptPath,
     `const pw = require('playwright-core');\n` +
+      `const readline = require('readline');\n` +
       `const cfg = ${JSON.stringify(driverCfg)};\n` +
       `(${insightestRecorderDriver.toString()})(pw, cfg).catch((e) => { console.error(e); process.exit(1); });\n`,
     'utf8'
@@ -1407,18 +1668,37 @@ export async function recordInsightestActions(startUrl: string): Promise<Insight
   const events: RawEvent[] = [];
   let stderr = '';
   const status = await new Promise<number | null>((resolve, reject) => {
+    // stdin is piped (not 'ignore'): the "Auto" toolbar button's file-upload fields need a real path, which
+    // only this main process can get (electron.dialog is unavailable in the child -- see the `needsFile`
+    // handling below) -- the child's exposeBinding handler for it blocks on a reply written here.
     const child = spawn(process.execPath, [scriptPath], {
       cwd: workDir,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     });
     readline.createInterface({ input: child.stdout! }).on('line', (line) => {
       if (!line.startsWith('@@insightest ')) return;
+      let evt: RawEvent | { kind: 'needsFile'; requestId: string };
       try {
-        events.push(JSON.parse(line.slice('@@insightest '.length)));
+        evt = JSON.parse(line.slice('@@insightest '.length));
       } catch {
-        /* partial line */
+        return; /* partial line */
       }
+      if (evt.kind === 'needsFile') {
+        const requestId = (evt as { requestId: string }).requestId;
+        const label = (evt as { label?: string }).label || '';
+        dialog
+          .showOpenDialog({ properties: ['openFile'], title: label ? m('Choose a file for "{label}"', { label }) : undefined })
+          .then((result) => {
+            const filePath = result.canceled ? null : (result.filePaths[0] ?? null);
+            child.stdin!.write(`${JSON.stringify({ requestId, filePath })}\n`);
+          })
+          .catch(() => {
+            child.stdin!.write(`${JSON.stringify({ requestId, filePath: null })}\n`);
+          });
+        return;
+      }
+      events.push(evt as RawEvent);
     });
     child.stderr!.on('data', (d) => { stderr = (stderr + String(d)).slice(-4000); });
     child.on('error', reject);

@@ -654,6 +654,14 @@ class PlaywrightBuilder {
     if (await this._do('Seleziona opzione', this.clean(selector), (l, extra) => l.selectOption(option, { ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
   };
 
+  /** Sets the file(s) on an <input type=file> (or a component that proxies to one). `value` is an absolute
+   * path (comma-separated for multiple files), as chosen by whoever recorded/edited the step. */
+  upload = async (selector, value, causesNavigation = false, options = {}) => {
+    const meta = this._takeMeta();
+    const paths = String(this.clean(value) ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+    if (await this._do('Carica file', this.clean(selector), (l, extra) => l.setInputFiles(paths, { ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
+  };
+
   /** selector null/'' => key goes to whatever has focus (page.keyboard). */
   keydown = async (selector, key, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();

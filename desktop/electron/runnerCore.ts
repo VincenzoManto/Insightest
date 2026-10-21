@@ -394,7 +394,7 @@ const ACTION_LINE_RE = new RegExp(`^(\\s*)await\\s+(page\\.[^\\n;]*?)\\.(${ACTIO
  * Their code is plain `await pw.click(selector, nav);` calls; all behaviour (retry, fallback, select2...) lives in
  * the builder. Same contract as ci-runner/runner.js: the runner supplies `pw` and hands each selector-bearing call
  * its steps_json entry via pw.useMeta(). Keep BUILDER_META_METHODS in sync with it and with src/stepModel.ts. */
-const BUILDER_META_METHODS = ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'clearInput'];
+const BUILDER_META_METHODS = ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'clearInput', 'upload'];
 const BUILDER_CALL_RE = new RegExp(String.raw`^(\s*)await\s+pw\.(` + BUILDER_META_METHODS.join('|') + String.raw`)\(`, 'gm');
 const BUILDER_CTOR_RE = /^[ \t]*const\s+pw\s*=\s*new\s+PlaywrightBuilder\([^\n]*\);?[ \t]*$/gm;
 

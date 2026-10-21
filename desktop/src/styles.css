@@ -193,6 +193,9 @@
   .tag-chip {
     @apply inline-flex items-center rounded-md bg-page px-1.5 py-px text-[11px] font-medium text-ink-secondary ring-1 ring-inset ring-gridline;
   }
+  .animate-fade-up {
+    animation-fill-mode: none !important;
+  }
 
   /* ---------- code / logs ---------- */
   .codeblock {

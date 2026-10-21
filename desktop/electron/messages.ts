@@ -70,6 +70,10 @@ const it: Record<string, string> = {
   Scroll: 'Scorri',
   'Drag to move, double click to reset': 'Trascina per spostare, doppio click per riportarla nell’angolo',
   'Error while recording': 'Errore durante la registrazione',
+  Auto: 'Auto',
+  'Auto-fill this page (fields, buttons, tabs, sections) and record it': 'Compila automaticamente questa pagina (campi, pulsanti, tab, sezioni) e registra tutto',
+  'Auto-filling…': 'Compilazione automatica…',
+  'Choose a file for "{label}"': 'Scegli un file per "{label}"',
 };
 
 const CATALOGUES: Record<Exclude<Locale, 'en'>, Record<string, string>> = { it };

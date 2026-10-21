@@ -355,7 +355,7 @@ function instrumentResilientActions(code, steps, priority = DEFAULT_SELECTOR_PRI
 // all behaviour (retry, fallback, first-match, select2...) lives in the builder. The runner only (a) supplies
 // `pw` itself and (b) hands each selector-bearing call its recorded metadata (steps_json[i]) via pw.useMeta(),
 // in order. Keep BUILDER_META_METHODS in sync with the scripts/import-legacy-tests.js emitter.
-const BUILDER_META_METHODS = ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'clearInput'];
+const BUILDER_META_METHODS = ['click', 'doubleClick', 'rightClick', 'hover', 'type', 'fill', 'select', 'keydown', 'select2', 'clearInput', 'upload'];
 const BUILDER_CALL_RE = new RegExp(String.raw`^(\s*)await\s+pw\.(` + BUILDER_META_METHODS.join('|') + String.raw`)\(`, 'gm');
 const BUILDER_CTOR_RE = /^[ \t]*const\s+pw\s*=\s*new\s+PlaywrightBuilder\([^\n]*\);?[ \t]*$/gm;
 function usesBuilder(code) {
