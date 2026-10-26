@@ -163,11 +163,14 @@ function buildAiTestPrompt(req: AiTestRequest): string {
     '',
     '--- Struttura obbligatoria del test (è quella che il nostro runner sa eseguire) ---',
     "1. Il file è SOLO: `import { test, expect } from '@playwright/test';` seguito da UN SOLO `test('nome', async ({ page }) => { ... });` di primo livello.",
-    '2. NIENTE test.describe, test.setTimeout, costanti, funzioni di supporto, hook o import aggiuntivi: tutto il corpo sta dentro quel test, con URL scritti per esteso. I timeout lunghi vanno solo sui singoli waitForURL/expect.',
-    "3. Un'azione per riga, nella forma `await page.<locator>.<azione>(...)` (click, fill, check, selectOption, press, goto...), poi le verifiche con `await expect(...)`. Selettori stabili (getByRole/getByLabel/getByTestId).",
+    '2. NIENTE test.describe, test.setTimeout, costanti, funzioni di supporto, hook o import aggiuntivi: tutto il corpo sta dentro quel test, con URL scritti per esteso. I timeout lunghi vanno solo sui singoli pw.wait.',
+    `3. ${PW_SYNTAX_RULES[0]}`,
+    ...PW_SYNTAX_RULES.slice(1).map((l) => `   ${l}`),
     req.projectId
       ? `4. INCAPSULAMENTO: il login e gli altri passaggi ripetuti sono già test a sé stanti del progetto ${req.projectId}, collegati come prerequisito ed eseguiti prima nella stessa sessione. ` +
-          'Usa i tool MCP insightest (list_tests, get_test) per trovare il test di login/prerequisito adatto e leggerne il codice: NON ripetere i suoi passaggi nel nuovo codice, parti dallo stato in cui lui lascia il browser.'
+          "Usa i tool MCP insightest (list_tests, get_test) per trovare il test di login/prerequisito adatto e leggerne il codice `pw.*`. PRIMA di esplorare o verificare qualsiasi selettore del nuovo test nel browser reale, esegui dal vivo (con i tool mcp__playwright-ai__*) l'equivalente di ciascuna sua azione `pw.*`, nello stesso ordine, così il browser si trova nello stato corretto (loggato, ecc.). " +
+          'NON includere quei passaggi nel codice finale: il nuovo test deve partire da dove il prerequisito lascia il browser, assumendo che venga eseguito prima da runner. ' +
+          `Chiama \`list_tests\` passando direttamente \`project_id: ${req.projectId}\` (lo conosci già): NON chiamare \`list_orgs\` o \`list_projects\`, non sono disponibili e non servono qui.`
       : '4. INCAPSULAMENTO: se serve un login, non includerlo: assumi che un test prerequisito lo abbia già fatto.',
     '',
     'Regole: NON modificare alcun file nel repository. ' +
@@ -188,6 +191,21 @@ function extractDependsOn(text: string): string | null {
   if (!m || /^none$/i.test(m[1])) return null;
   return m[1].replace(/^[`"']|[`"']$/g, '');
 }
+
+/** Shared across buildAiTestPrompt/buildAiChatPrompt: the exact DSL our runner executes
+ * (PlaywrightBuilder, see src/stepModel.ts callLine() and runnerCore.ts BUILDER_META_METHODS) --
+ * NOT raw `page.locator(...)`. Keep the method list in sync with both files. */
+const PW_SYNTAX_RULES = [
+  "Il codice NON usa `page.<locator>.<azione>()` ma la DSL del nostro runner: un oggetto `pw` (PlaywrightBuilder) con un metodo per azione. " +
+    'Non importare né istanziare PlaywrightBuilder, non scrivere `const pw = ...`, non usare `page` direttamente: il runner le aggiunge da solo, tu scrivi solo le chiamate `await pw.<azione>(...);`.',
+  'Metodi disponibili (selettore = stringa CSS/testo/xpath, `nav` = true se quell\'azione causa una navigazione da attendere):',
+  '   `pw.load(url)`, `pw.click(selettore, nav)`, `pw.doubleClick(selettore, nav)`, `pw.rightClick(selettore, nav)`, `pw.hover(selettore, nav)`,',
+  '   `pw.fill(selettore, valore, nav)`, `pw.type(selettore, valore, nav)`, `pw.clearInput(selettore)`, `pw.upload(selettore, percorsoFile, nav)`,',
+  '   `pw.select(selettore, valore, nav)` per un `<select>` nativo, `pw.select2(selettore, valoreOIndice, nav)` per un menu select2/combobox custom (NON usare `click` sulle sue opzioni),',
+  '   `pw.keydown(selettore_o_null, tasto, nav)`, `pw.wait(ms)`, `pw.back()`, `pw.forward()`, `pw.refresh()`, `pw.resize(w, h)`,',
+  '   `pw.awaitText(null, null, testo)` per aspettare un testo in pagina, `pw.awaitNetworkStatus(urlPattern, statusCode)`, `pw.confirm(true|false)` e `pw.prompt(testo)` per i dialog nativi.',
+  'Una chiamata per riga, SEMPRE con `await`. Per verificare che qualcosa sia visibile/contenga un testo usa `pw.awaitText(...)`, non `expect(...)` (che non fa parte di questa DSL).',
+];
 
 const truncate = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
 
@@ -413,9 +431,12 @@ function buildAiChatPrompt(req: AiChatRequest): string {
     '--- Struttura obbligatoria del test, quando rispondi con status "code" (è quella che il nostro runner sa eseguire) ---',
     "1. Il file è SOLO: `import { test, expect } from '@playwright/test';` seguito da UN SOLO `test('nome', async ({ page }) => { ... });` di primo livello.",
     '2. NIENTE test.describe, test.setTimeout, costanti, funzioni di supporto, hook o import aggiuntivi: tutto il corpo sta dentro quel test, con URL scritti per esteso.',
-    "3. Un'azione per riga, nella forma `await page.<locator>.<azione>(...)`, poi le verifiche con `await expect(...)`. Selettori stabili (getByRole/getByLabel/getByTestId).",
+    `3. ${PW_SYNTAX_RULES[0]}`,
+    ...PW_SYNTAX_RULES.slice(1).map((l) => `   ${l}`),
     req.projectId
-      ? `4. INCAPSULAMENTO: il login e gli altri passaggi ripetuti sono già test a sé stanti del progetto ${req.projectId}. Usa i tool MCP insightest (list_tests, get_test) per trovare il test di login/prerequisito adatto: NON ripeterne i passaggi, parti dallo stato in cui lascia il browser.`
+      ? `4. INCAPSULAMENTO: il login e gli altri passaggi ripetuti sono già test a sé stanti del progetto ${req.projectId}. Usa i tool MCP insightest (list_tests, get_test) per trovare il test di login/prerequisito adatto e leggerne il codice \`pw.*\`. ` +
+          "PRIMA di esplorare l'app o verificare un selettore del nuovo test nel browser reale, esegui dal vivo (con i tool mcp__playwright-ai__*) l'equivalente di ciascuna sua azione `pw.*` nello stesso ordine, così il browser parte dallo stato corretto (loggato, ecc.). NON includere quei passaggi nel codice finale. " +
+          `Chiama \`list_tests\` passando direttamente \`project_id: ${req.projectId}\` (lo conosci già): NON chiamare \`list_orgs\` o \`list_projects\`, non sono disponibili e non servono qui.`
       : '4. INCAPSULAMENTO: se serve un login, non includerlo: assumi che un test prerequisito lo abbia già fatto.',
     '',
     'Rispondi SEMPRE e SOLO con un blocco ```json nella forma seguente (nessun testo fuori dal blocco):',

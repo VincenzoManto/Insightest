@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Play, Pencil, Wand2, Wrench, Globe, MousePointerClick, Type, CheckSquare, ChevronDown, ChevronUp, Keyboard, Code2, Video, Tag as TagIcon, StickyNote, X, Plus, Save, MoreVertical, FileText, CheckCircle2, XCircle, CircleDot, FolderOpen, Hourglass, Download } from 'lucide-react';
+import { ArrowLeft, Play, Pencil, Wand2, Wrench, Globe, MousePointerClick, Type, CheckSquare, ChevronDown, ChevronUp, Keyboard, Code2, Video, Tag as TagIcon, StickyNote, X, Plus, Save, MoreVertical, FileText, CheckCircle2, XCircle, CircleDot, FolderOpen, Hourglass, Download, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import { computeStepStatuses, type StatusStep, type StepStatus } from '../stepStatus';
 import { getFailureReason } from '../failureReason';
@@ -41,6 +41,9 @@ interface ParsedStep {
   raw: string;
   chain?: string;
 }
+
+/** Lines printed by reportApiErrors() in the generated suite (pwBuilder.js) for every 4xx/5xx API call seen. */
+const API_ERROR_RE = /\[insightest-api-error]/;
 
 const ANY_ACTION_METHODS = 'click|fill|dblclick|check|uncheck|selectOption|press|hover|tap|type|setInputFiles|selectText';
 const CHAIN_RE = new RegExp(`^await\\s+(page\\.[^;]*?)\\.(${ANY_ACTION_METHODS})\\(`);
@@ -1267,6 +1270,11 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                     <RunStatusDot status={run.status} />
                     <RunBadge status={run.status} />
                     <span className="text-xs text-ink-secondary">{run.triggered_by === 'ci' ? t('CI/CD') : t('Local')}</span>
+                    {run.has_api_errors && (
+                      <span className="badge badge-critical" title={t('This run had a 4xx/5xx API call')}>
+                        <AlertTriangle size={11} /> {t('API')}
+                      </span>
+                    )}
                     <span className="text-xs text-ink-muted">{run.duration_ms ? `${run.duration_ms}ms` : '—'}</span>
                     <span className="ml-auto text-xs text-ink-muted">{formatDateTime(run.created_at)}</span>
                     <button className="secondary !px-2 !py-1 text-xs" onClick={() => viewRunLog(run.id)}>
@@ -1370,7 +1378,13 @@ export function TestDetailScreen({ testId, onBack }: { testId: number; onBack: (
                         </div>
                       );
                     })()}
-                    <pre className="codeblock m-0 min-h-0 flex-1 overflow-auto">{logModal.log}</pre>
+                    <pre className="codeblock m-0 min-h-0 flex-1 overflow-auto">
+                      {(logModal.log ?? '').split('\n').map((line, i) => (
+                        <div key={i} className={API_ERROR_RE.test(line) ? 'rounded bg-critical/15 px-1 font-semibold text-critical' : undefined}>
+                          {line}
+                        </div>
+                      ))}
+                    </pre>
                   </div>
                 )}
               </div>

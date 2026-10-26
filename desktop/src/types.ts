@@ -87,6 +87,8 @@ export interface TestRun {
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
+  /** Whether its log contains a 4xx/5xx API call (surfaced even on an otherwise-passed run). */
+  has_api_errors: boolean;
 }
 
 export interface TestRunDetail extends TestRun {
@@ -107,6 +109,8 @@ export interface CiRunRow {
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
+  /** Whether its log contains a 4xx/5xx API call (surfaced even on an otherwise-passed test). */
+  has_api_errors: boolean;
 }
 
 export interface Folder {

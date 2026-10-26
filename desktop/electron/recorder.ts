@@ -142,7 +142,9 @@ function insightestPageRecorder(cfg: PageRecorderConfig): void {
     return flush();
   }
 
-  let paused = false;
+  let paused = true;
+  let started = false;
+  let trackHoverScroll = false;
   let host: HTMLElement | null = null;
   const fromToolbar = (e: Event): boolean => !!host && e.composedPath().includes(host);
 
@@ -883,6 +885,7 @@ function insightestPageRecorder(cfg: PageRecorderConfig): void {
     burst.timer = setTimeout(() => {
       wheelBurst = null;
       settled = { x: window.scrollX, y: window.scrollY };
+      if (!trackHoverScroll) return;
       const dx = Math.round(window.scrollX - burst.x);
       const dy = Math.round(window.scrollY - burst.y);
       if (!dx && !dy) return;
@@ -913,7 +916,7 @@ function insightestPageRecorder(cfg: PageRecorderConfig): void {
     const t = eventTarget(e);
     if (!t) return;
     pointerEl = t;
-    if (paused || picking || inSelect2(t) || down) return;
+    if (paused || picking || inSelect2(t) || down || !trackHoverScroll) return;
     const el = hoverTarget(t);
     if (el === document.body || el === document.documentElement) return;
     if (hoverCand && hoverCand.el === el) return;
@@ -1047,9 +1050,9 @@ function insightestPageRecorder(cfg: PageRecorderConfig): void {
   let panel: HTMLElement | null = null;
   function renderStatus(hint?: string): void {
     if (!statusEl || !pauseBtn || !dot) return;
-    statusEl.textContent = hint || (paused ? L('Paused') : lastLabel ? `${L('Last:')} ${lastLabel}` : L('Recording…'));
-    pauseBtn.textContent = paused ? L('Resume') : L('Pause');
-    dot.className = paused ? 'dot paused' : 'dot';
+    statusEl.textContent = hint || (!started ? L('Not recording') : paused ? L('Paused') : lastLabel ? `${L('Last:')} ${lastLabel}` : L('Recording…'));
+    pauseBtn.textContent = !started ? L('Record') : paused ? L('Resume') : L('Pause');
+    dot.className = !started || paused ? 'dot paused' : 'dot';
   }
   function showPanel(content: HTMLElement | null): void {
     if (!panel) return;
@@ -1116,13 +1119,19 @@ function insightestPageRecorder(cfg: PageRecorderConfig): void {
     dot = document.createElement('span');
     grip.append(handle, dot, document.createTextNode('Insightest'));
     top.appendChild(grip);
-    pauseBtn = button(L('Pause'), L('Pause / resume recording'), () => {
+    pauseBtn = button(L('Record'), L('Pause / resume recording'), () => {
       finishSelect2();
+      started = true;
       paused = !paused;
       send({ kind: paused ? 'pause' : 'resume', url: location.href });
       renderStatus();
     });
     top.appendChild(pauseBtn);
+    const hoverScrollBtn = button(L('Record hover/scroll'), L('Also record hover and scroll movements'), () => {
+      trackHoverScroll = !trackHoverScroll;
+      hoverScrollBtn.style.background = trackHoverScroll ? '#ddf4ff' : '';
+    });
+    top.appendChild(hoverScrollBtn);
     top.appendChild(button(L('Stop recording'), L('Ends the recording and closes the browser'), () => { finishSelect2(); send({ kind: 'stop' }); }, 'stop'));
 
     const tools = document.createElement('div');
@@ -1253,7 +1262,7 @@ async function insightestRecorderDriver(pw: any, cfg: DriverConfig): Promise<voi
   const pages: any[] = [];
   const network: { url: string; status: number; method: string; reqTs: number }[] = [];
   const requestTs = new WeakMap<any, number>();
-  let paused = false;
+  let paused = true;
   let toolbarPos: { x: number; y: number } | null = null;
   let closing = false;
   const close = (): void => {
@@ -1635,7 +1644,8 @@ export function actionToBuilderStep(a: InsightestAction): RecordedBuilderStep | 
 /* =================================================================================================== entry point */
 
 const TOOLBAR_LABELS = [
-  'Pause', 'Resume', 'Paused', 'Recording…', 'Last:', 'Stop recording', 'Pause / resume recording', 'Ends the recording and closes the browser',
+  'Pause', 'Resume', 'Record', 'Not recording', 'Paused', 'Recording…', 'Last:', 'Stop recording', 'Pause / resume recording', 'Ends the recording and closes the browser',
+  'Record hover/scroll', 'Also record hover and scroll movements',
   'Wait for text', 'Select some text on the page first, or click here and then on the element', 'Click the element whose text to wait for (Esc to cancel)',
   'Wait for network', 'Wait for one of the recent network responses', 'No recent network responses', 'Wait', 'Adds a fixed pause (ms)', 'Milliseconds',
   'Screenshot', 'Full page screenshot', 'Custom JavaScript code run in the page', 'Custom code', 'Add', 'Hover: Ctrl+Shift+H on the element under the pointer',

@@ -541,6 +541,10 @@ const it: Record<string, string> = {
   'No test matches the search.': 'Nessun test corrisponde alla ricerca.',
   'Delete this CI run': 'Elimina questa run CI',
   'Delete this CI run ({n} tests)? This cannot be undone.': 'Eliminare questa run CI ({n} test)? L’azione non è reversibile.',
+  'Tests whose log contains a 4xx/5xx API call': 'Test il cui log contiene una chiamata API 4xx/5xx',
+  '{n} API error(s)': '{n} errore/i API',
+  'This run had a 4xx/5xx API call': 'Questa esecuzione ha avuto una chiamata API 4xx/5xx',
+  API: 'API',
 };
 
 export default it;

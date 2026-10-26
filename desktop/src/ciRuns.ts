@@ -16,6 +16,8 @@ export interface CiRunGroup {
   passed: number;
   failed: number;
   other: number;
+  /** Tests (passed or not) whose log contains a 4xx/5xx API call. */
+  apiErrors: number;
   durationMs: number;
 }
 
@@ -46,16 +48,18 @@ function rank(status: CiRunRow['status']): number {
   return status === 'failed' ? 0 : status === 'error' ? 1 : status === 'running' ? 2 : 3;
 }
 
-export function counts(items: CiRunRow[]): { passed: number; failed: number; other: number } {
+export function counts(items: CiRunRow[]): { passed: number; failed: number; other: number; apiErrors: number } {
   let passed = 0;
   let failed = 0;
   let other = 0;
+  let apiErrors = 0;
   for (const r of items) {
     if (r.status === 'passed') passed++;
     else if (r.status === 'failed' || r.status === 'error') failed++;
     else other++;
+    if (r.has_api_errors) apiErrors++;
   }
-  return { passed, failed, other };
+  return { passed, failed, other, apiErrors };
 }
 
 /** Newest run first. */

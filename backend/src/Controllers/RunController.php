@@ -31,11 +31,17 @@ final class RunController
         }
 
         $stmt = Database::pdo()->prepare(
-            'SELECT id, status, duration_ms, triggered_by, healed, healing_detail, started_at, finished_at, created_at
-             FROM test_runs WHERE test_id = ? ORDER BY created_at DESC LIMIT 100'
+            "SELECT id, status, duration_ms, triggered_by, healed, healing_detail, started_at, finished_at, created_at,
+                    CASE WHEN log LIKE '%[insightest-api-error]%' THEN 1 ELSE 0 END AS has_api_errors
+             FROM test_runs WHERE test_id = ? ORDER BY created_at DESC LIMIT 100"
         );
         $stmt->execute([$testId]);
-        Response::json(['runs' => $stmt->fetchAll()]);
+        $rows = $stmt->fetchAll();
+        foreach ($rows as &$row) {
+            $row['has_api_errors'] = (bool) $row['has_api_errors'];
+        }
+        unset($row);
+        Response::json(['runs' => $rows]);
     }
 
     /**
@@ -49,7 +55,8 @@ final class RunController
 
         $stmt = Database::pdo()->prepare(
             "SELECT r.id, r.test_id, t.name AS test_name, t.folder_id, r.status, r.duration_ms, r.run_key,
-                    r.started_at, r.finished_at, r.created_at
+                    r.started_at, r.finished_at, r.created_at,
+                    CASE WHEN r.log LIKE '%[insightest-api-error]%' THEN 1 ELSE 0 END AS has_api_errors
              FROM test_runs r
              JOIN tests t ON t.id = r.test_id
              WHERE t.project_id = ? AND r.triggered_by = 'ci'
@@ -64,6 +71,7 @@ final class RunController
             $row['test_id'] = (int) $row['test_id'];
             $row['folder_id'] = $row['folder_id'] !== null ? (int) $row['folder_id'] : null;
             $row['duration_ms'] = $row['duration_ms'] !== null ? (int) $row['duration_ms'] : null;
+            $row['has_api_errors'] = (bool) $row['has_api_errors'];
         }
         unset($row);
         Response::json(['runs' => $rows]);

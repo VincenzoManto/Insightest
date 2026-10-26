@@ -156,9 +156,19 @@ class PlaywrightBuilder {
     });
   }
 
+  /** A pseudo-element (`:before`/`::after`) isn't a real DOM node: a CSS locator ending in one never matches
+   * anything, so the step just times out. A recorded/typed selector ending in one almost always means "the
+   * element that renders it" (`_clickTarget` redirects a zero-size label to its real control if needed), so the
+   * suffix is dropped before building the locator. */
+  _stripPseudoElement(sel) {
+    return sel.replace(/::?(before|after)\s*$/i, '');
+  }
+
   /** Always the FIRST match (Puppeteer semantics) -- never a strict-mode failure. */
   _locator(cand) {
-    return (cand.text !== undefined ? this.page.getByText(cand.text) : this.page.locator(cand.sel)).first();
+    if (cand.text !== undefined) return this.page.getByText(cand.text).first();
+    const sel = cand.sel.startsWith('xpath=') ? cand.sel : this._stripPseudoElement(cand.sel);
+    return this.page.locator(sel).first();
   }
 
   _label(cand) {
@@ -598,9 +608,40 @@ class PlaywrightBuilder {
 
   // ---------------------------------------------------------------- selector actions
 
+  /** Custom checkboxes/radios often style a zero-size `<label>` purely via ::before/::after and hide the real
+   * `<input>` behind it (absolute position, opacity 0, negative z-index) -- a real mouse click, even forced,
+   * is dispatched at real page coordinates and resolved by the browser's own hit-testing, which these widgets
+   * are specifically built to defeat. Rather than guess at coordinates, this flips `checked` on the label's real
+   * control directly and fires the same events a native click would (`input`, `change`, `click`), with no mouse
+   * event and no hit-testing involved. Returns whether it found and toggled one. */
+  async _toggleCheckboxLike(locator) {
+    let handle;
+    try { handle = await locator.elementHandle({ timeout: 3000 }); } catch { return false; }
+    if (!handle) return false;
+    try {
+      const box = await handle.boundingBox().catch(() => null);
+      if (box && box.width > 0 && box.height > 0) return false; // has a real area: let the normal click land on it
+      return await handle.evaluate((el) => {
+        const input = el.tagName === 'LABEL' ? el.control : el.matches?.('input[type="checkbox"],input[type="radio"]') ? el : null;
+        if (!input || (input.type !== 'checkbox' && input.type !== 'radio')) return false;
+        if (input.type === 'radio' && input.checked) return true; // already selected: a real click would be a no-op too
+        input.checked = !input.checked;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        return true;
+      });
+    } finally {
+      await handle.dispose().catch(() => {});
+    }
+  }
+
   click = async (selector, causesNavigation = false, options = {}) => {
     const meta = this._takeMeta();
-    if (await this._do('Click', this.clean(selector), (l, extra) => l.click({ ...options, ...extra }), meta)) await this._afterAction(causesNavigation);
+    if (await this._do('Click', this.clean(selector), async (l, extra) => {
+      if (await this._toggleCheckboxLike(l)) return;
+      await l.click({ ...options, ...extra });
+    }, meta)) await this._afterAction(causesNavigation);
   };
 
   doubleClick = async (selector, causesNavigation = false, options = {}) => {
@@ -817,15 +858,30 @@ class PlaywrightBuilder {
     // option is not in the initial page of results. Dropdowns without a search box are matched as they are.
     const search = this.page.locator('.select2-container--open .select2-search__field').last();
     const hasSearch = await search.isVisible().catch(() => false);
-    if (hasSearch) {
+    if (!hasSearch) {
+      const i = await poll(3000);
+      if (i < 0) throw new Error('select2 option not found: ' + text);
+      return options.nth(i);
+    }
+    // The option's visible text is often "CODE - long description": some apps' own search (local or ajax) only
+    // matches against the code and returns nothing for the full string. Retry with narrower queries -- the part
+    // before the separator, then the first word -- until one of them makes the app list the wanted option.
+    const queries = [text];
+    const sep = text.split(/\s*[-–—]\s*/).filter(Boolean);
+    if (sep.length > 1 && !queries.includes(sep[0])) queries.push(sep[0]);
+    const firstWord = text.trim().split(/\s+/)[0];
+    if (firstWord && firstWord !== text && !queries.includes(firstWord)) queries.push(firstWord);
+    let i = -1;
+    for (const q of queries) {
       await search.fill('');
-      await search.pressSequentially(text, { delay: 30 });
+      await search.pressSequentially(q, { delay: 30 });
       await sleep(450); // ajax select2 debounces (default 250ms) before it even shows "Searching…"
       const loading = this.page.locator('.select2-results__option.loading-results, .select2-results__option--loading');
       const end = Date.now() + 10000;
       while (Date.now() < end && (await loading.count().catch(() => 0)) > 0) await sleep(150);
+      i = await poll(8000);
+      if (i >= 0) break;
     }
-    const i = await poll(hasSearch ? 8000 : 3000);
     if (i < 0) throw new Error('select2 option not found: ' + text);
     return options.nth(i);
   }

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, CircleDot, RefreshCw, Search, Trash2, Wand2, Wrench, X, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, CircleDot, RefreshCw, Search, Trash2, Wand2, Wrench, X, XCircle } from 'lucide-react';
 import { useAuth } from '../state/AuthContext';
 import type { CiRunRow, Folder, Project } from '../types';
 import { counts, filterGroups, folderPathOf, formatDuration, groupCiRuns, type CiRunGroup, type StatusFilter } from '../ciRuns';
@@ -9,6 +9,8 @@ import { formatDateTime, t } from '../i18n';
 
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
+/** Lines printed by reportApiErrors() in the generated suite (pwBuilder.js) for every 4xx/5xx API call seen. */
+const API_ERROR_RE = /\[insightest-api-error]/;
 
 function StatusIcon({ status }: { status: CiRunRow['status'] }): React.ReactElement {
   if (status === 'passed') return <CheckCircle2 size={15} className="flex-shrink-0 text-good" />;
@@ -185,6 +187,11 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
                   <CheckCircle2 size={12} /> {c.passed}
                 </span>
                 {c.other > 0 && <span className="badge badge-warning">{c.other}</span>}
+                {c.apiErrors > 0 && (
+                  <span className="badge badge-critical" title={t('Tests whose log contains a 4xx/5xx API call')}>
+                    <AlertTriangle size={12} /> {t('{n} API error(s)', { n: c.apiErrors })}
+                  </span>
+                )}
                 <span className="text-ink-muted">{t('{n} tests', { n: group.items.length })}</span>
                 <span className="text-ink-muted">· {formatDuration(group.durationMs)}</span>
               </span>
@@ -227,6 +234,11 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
                     <button type="button" onClick={() => onOpenTest(r.test_id)} title={t('Open test')} className="ghost !h-auto !min-w-0 !justify-start !truncate !px-1 !py-0.5 !text-[13px] !font-medium text-ink-primary hover:underline">
                       {r.test_name}
                     </button>
+                    {r.has_api_errors && (
+                      <span className="badge badge-critical flex-shrink-0" title={t('This run had a 4xx/5xx API call')}>
+                        <AlertTriangle size={11} /> {t('API')}
+                      </span>
+                    )}
                     {folder && <span className="hidden min-w-0 truncate text-xs text-ink-muted md:inline">{folder}</span>}
                     <span className="ml-auto flex-shrink-0 text-xs text-ink-muted">{formatDuration(r.duration_ms ?? 0)}</span>
                     {failed && (
@@ -234,7 +246,7 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
                         <Wand2 size={12} /> {t('Heal')}
                       </button>
                     )}
-                    {failed && (
+                    {(failed || r.has_api_errors) && (
                       <button type="button" className="secondary sm flex-shrink-0" onClick={() => void toggleLog(r)}>
                         {log ? t('Hide log') : t('Show log')}
                       </button>
@@ -255,7 +267,15 @@ export function CiRunsScreen({ project, onOpenTest }: { project: Project; onOpen
                     </div>
                   )}
                   {log && (
-                    <pre className="codeblock mt-2 max-h-64 overflow-auto">{log.loading ? t('Loading…') : log.text}</pre>
+                    <pre className="codeblock mt-2 max-h-64 overflow-auto">
+                      {log.loading
+                        ? t('Loading…')
+                        : log.text.split('\n').map((line, i) => (
+                            <div key={i} className={API_ERROR_RE.test(line) ? 'rounded bg-critical/15 px-1 font-semibold text-critical' : undefined}>
+                              {line}
+                            </div>
+                          ))}
+                    </pre>
                   )}
                 </div>
               );
